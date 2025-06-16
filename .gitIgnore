@@ -1,0 +1,5 @@
+__pycache__
+/venv
+.env
+fire.json
+.DS_Store
