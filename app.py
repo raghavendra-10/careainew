@@ -211,6 +211,8 @@ def extract_excel_text(file_path, file_type):
         if "openpyxl" in error_msg or "xlrd" in error_msg:
             return "ERROR: Missing Excel dependencies. Install with: pip install openpyxl xlrd"
         return f"Excel processing error: {error_msg}"
+    
+
 def download_single_file_as_zip(backend_api_url, file_id, filename, headers):
     """Download a single file by requesting it as a ZIP and extracting it"""
     try:
@@ -355,6 +357,8 @@ def download_single_file_as_zip(backend_api_url, file_id, filename, headers):
     except Exception as e:
         print(f"❌ Error downloading file as ZIP: {str(e)}")
         raise
+
+
 def extract_csv_text(file_path):
     """Extract text from CSV files with smart delimiter detection"""
     try:
@@ -1248,7 +1252,8 @@ def postQuestionsToBackend(rfpId, questions, auth_token):
 
     except Exception as e:
         print(f"❌ Error posting questions to backend: {str(e)}")
-def postAgentResultsAndQuestions(rfpId, agentResults, auth_token,agent_id=None):
+
+def postAgentResultsAndQuestions(rfpId, agentResults, auth_token, agent_id=None):
     """Post both agent results and questions to backend"""
     try:
         # Post agent results
@@ -1259,13 +1264,19 @@ def postAgentResultsAndQuestions(rfpId, agentResults, auth_token,agent_id=None):
         if auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
 
-
-
+        # Extract file extension from processed files
+        file_extension = None
+        processed_files = agentResults.get("processed_files", [])
+        if processed_files and len(processed_files) > 0:
+            # Get file extension from the first processed file
+            file_extension = processed_files[0].get("file_type", "")
+        print(f"📂 Detected file extension: {file_extension}")
         response = requests.post(
             agent_response_url,
             json={
                 "agentId": agent_id,
                 "questions": agentResults.get("questions", []),
+                "fileExtension": file_extension,  # ADD THIS LINE
             },
             headers=headers,
             timeout=30
@@ -1372,336 +1383,336 @@ def get_supported_file_types():
         }
     })
 
-@app.route("/extract-questions", methods=["POST", "OPTIONS"])
-def extract_questions_from_files():
-    """Extract questions from multiple uploaded files using AI (multimodal)"""
-    if request.method == "OPTIONS":
-        return "", 200
+# @app.route("/extract-questions", methods=["POST", "OPTIONS"])
+# def extract_questions_from_files():
+#     """Extract questions from multiple uploaded files using AI (multimodal)"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-    if not VERTEX_AVAILABLE:
-        return jsonify({"error": "AI generation service is not available"}), 503
+#     if not VERTEX_AVAILABLE:
+#         return jsonify({"error": "AI generation service is not available"}), 503
         
-    try:
-        org_id = request.args.get("orgId")
-        extraction_id = request.args.get("extractionId", str(uuid.uuid4()))
+#     try:
+#         org_id = request.args.get("orgId")
+#         extraction_id = request.args.get("extractionId", str(uuid.uuid4()))
         
-        print(f"🤖 Starting multimodal question extraction with ID: {extraction_id} for org: {org_id}")
+#         print(f"🤖 Starting multimodal question extraction with ID: {extraction_id} for org: {org_id}")
         
-        if not org_id:
-            return jsonify({"error": "orgId is required"}), 400
+#         if not org_id:
+#             return jsonify({"error": "orgId is required"}), 400
 
-        # Check if files were uploaded and validate
-        if not request.files:
-            return jsonify({"error": "No files provided"}), 400
+#         # Check if files were uploaded and validate
+#         if not request.files:
+#             return jsonify({"error": "No files provided"}), 400
 
-        uploaded_files = request.files.getlist('files')  # Get multiple files
-        if not uploaded_files:
-            return jsonify({"error": "No files found in request"}), 400
+#         uploaded_files = request.files.getlist('files')  # Get multiple files
+#         if not uploaded_files:
+#             return jsonify({"error": "No files found in request"}), 400
         
-        # Check for empty files
-        valid_files = []
-        for file in uploaded_files:
-            if file.filename and file.filename.strip():
-                valid_files.append(file)
+#         # Check for empty files
+#         valid_files = []
+#         for file in uploaded_files:
+#             if file.filename and file.filename.strip():
+#                 valid_files.append(file)
         
-        if not valid_files:
-            return jsonify({"error": "No valid files found (all files appear to be empty or unnamed)"}), 400
+#         if not valid_files:
+#             return jsonify({"error": "No valid files found (all files appear to be empty or unnamed)"}), 400
 
-        print(f"📁 Processing {len(valid_files)} valid files")
+#         print(f"📁 Processing {len(valid_files)} valid files")
 
-        # Read all files into memory before starting async processing
-        file_data_list = []
-        for file in valid_files:
-            try:
-                file.seek(0)
-                file_content = file.read()
+#         # Read all files into memory before starting async processing
+#         file_data_list = []
+#         for file in valid_files:
+#             try:
+#                 file.seek(0)
+#                 file_content = file.read()
                 
-                if len(file_content) == 0:
-                    print(f"⚠️ Skipping empty file: {file.filename}")
-                    continue
+#                 if len(file_content) == 0:
+#                     print(f"⚠️ Skipping empty file: {file.filename}")
+#                     continue
                     
-                file_data_list.append({
-                    'filename': file.filename,
-                    'content': file_content,
-                    'size': len(file_content)
-                })
-                print(f"✅ Read {file.filename} ({len(file_content)} bytes)")
+#                 file_data_list.append({
+#                     'filename': file.filename,
+#                     'content': file_content,
+#                     'size': len(file_content)
+#                 })
+#                 print(f"✅ Read {file.filename} ({len(file_content)} bytes)")
                 
-            except Exception as e:
-                print(f"❌ Error reading file {file.filename}: {str(e)}")
-                return jsonify({"error": f"Failed to read file {file.filename}: {str(e)}"}), 400
-            finally:
-                try:
-                    file.close()
-                except:
-                    pass
+#             except Exception as e:
+#                 print(f"❌ Error reading file {file.filename}: {str(e)}")
+#                 return jsonify({"error": f"Failed to read file {file.filename}: {str(e)}"}), 400
+#             finally:
+#                 try:
+#                     file.close()
+#                 except:
+#                     pass
         
-        if not file_data_list:
-            return jsonify({"error": "No files could be read successfully"}), 400
+#         if not file_data_list:
+#             return jsonify({"error": "No files could be read successfully"}), 400
 
-        # Initialize progress tracking
-        update_upload_progress(extraction_id, "Processing", 0, "Starting multimodal question extraction", "")
+#         # Initialize progress tracking
+#         update_upload_progress(extraction_id, "Processing", 0, "Starting multimodal question extraction", "")
         
-        def process_files_async():
-            try:
-                results = []
-                total_files = len(file_data_list)
+#         def process_files_async():
+#             try:
+#                 results = []
+#                 total_files = len(file_data_list)
                 
-                # Get supported file types
-                supported, missing = check_file_processing_dependencies()
-                all_supported = supported["always"] + supported["conditional"] + ["png", "jpg", "jpeg", "gif", "webp"]
+#                 # Get supported file types
+#                 supported, missing = check_file_processing_dependencies()
+#                 all_supported = supported["always"] + supported["conditional"] + ["png", "jpg", "jpeg", "gif", "webp"]
                 
-                for index, file_data in enumerate(file_data_list):
-                    filename = file_data['filename']
-                    file_content = file_data['content']
-                    file_ext = filename.split(".")[-1].lower()
+#                 for index, file_data in enumerate(file_data_list):
+#                     filename = file_data['filename']
+#                     file_content = file_data['content']
+#                     file_ext = filename.split(".")[-1].lower()
                     
-                    # Validate file type
-                    if file_ext not in all_supported:
-                        results.append({
-                            "filename": filename,
-                            "status": "error",
-                            "error": f"Unsupported file type: {file_ext}. Supported: {', '.join(sorted(all_supported))}",
-                            "questions": []
-                        })
-                        continue
+#                     # Validate file type
+#                     if file_ext not in all_supported:
+#                         results.append({
+#                             "filename": filename,
+#                             "status": "error",
+#                             "error": f"Unsupported file type: {file_ext}. Supported: {', '.join(sorted(all_supported))}",
+#                             "questions": []
+#                         })
+#                         continue
                     
-                    try:
-                        # Update progress
-                        progress = (index / total_files) * 80
-                        update_upload_progress(extraction_id, "Processing", progress, 
-                                            f"Processing file {index + 1}/{total_files}: {filename}")
+#                     try:
+#                         # Update progress
+#                         progress = (index / total_files) * 80
+#                         update_upload_progress(extraction_id, "Processing", progress, 
+#                                             f"Processing file {index + 1}/{total_files}: {filename}")
                         
-                        # Save file content to temporary file
-                        save_path = os.path.join(UPLOAD_FOLDER, f"{extraction_id}_{index}_{filename}")
-                        with open(save_path, 'wb') as f:
-                            f.write(file_content)
+#                         # Save file content to temporary file
+#                         save_path = os.path.join(UPLOAD_FOLDER, f"{extraction_id}_{index}_{filename}")
+#                         with open(save_path, 'wb') as f:
+#                             f.write(file_content)
                         
-                        update_upload_progress(extraction_id, "Processing", progress + 2, 
-                                            f"File saved: {filename}")
+#                         update_upload_progress(extraction_id, "Processing", progress + 2, 
+#                                             f"File saved: {filename}")
                         
-                        # Use direct file upload to AI
-                        update_upload_progress(extraction_id, "Processing", progress + 5, 
-                                            f"AI analyzing {filename}")
+#                         # Use direct file upload to AI
+#                         update_upload_progress(extraction_id, "Processing", progress + 5, 
+#                                             f"AI analyzing {filename}")
                         
-                        questions = extract_questions_with_ai_direct(save_path, filename)
+#                         questions = extract_questions_with_ai_direct(save_path, filename)
                         
-                        if not questions:
-                            results.append({
-                                "filename": filename,
-                                "status": "error", 
-                                "error": "AI could not extract questions from this file",
-                                "questions": []
-                            })
-                        else:
-                            results.append({
-                                "filename": filename,
-                                "status": "success",
-                                "file_type": file_ext,
-                                "questions": questions,
-                                "question_count": len(questions)
-                            })
+#                         if not questions:
+#                             results.append({
+#                                 "filename": filename,
+#                                 "status": "error", 
+#                                 "error": "AI could not extract questions from this file",
+#                                 "questions": []
+#                             })
+#                         else:
+#                             results.append({
+#                                 "filename": filename,
+#                                 "status": "success",
+#                                 "file_type": file_ext,
+#                                 "questions": questions,
+#                                 "question_count": len(questions)
+#                             })
                             
-                            print(f"✅ Extracted {len(questions)} questions from {filename}")
+#                             print(f"✅ Extracted {len(questions)} questions from {filename}")
                         
-                        # Clean up temporary file
-                        try:
-                            os.remove(save_path)
-                        except Exception as e:
-                            print(f"⚠️ Failed to remove temp file {save_path}: {e}")
+#                         # Clean up temporary file
+#                         try:
+#                             os.remove(save_path)
+#                         except Exception as e:
+#                             print(f"⚠️ Failed to remove temp file {save_path}: {e}")
                             
-                    except Exception as file_error:
-                        print(f"❌ Error processing file {filename}: {str(file_error)}")
-                        traceback.print_exc()
-                        results.append({
-                            "filename": filename,
-                            "status": "error",
-                            "error": str(file_error),
-                            "questions": []
-                        })
+#                     except Exception as file_error:
+#                         print(f"❌ Error processing file {filename}: {str(file_error)}")
+#                         traceback.print_exc()
+#                         results.append({
+#                             "filename": filename,
+#                             "status": "error",
+#                             "error": str(file_error),
+#                             "questions": []
+#                         })
                 
-                # Final processing - compile all questions
-                update_upload_progress(extraction_id, "Processing", 90, "Compiling results")
+#                 # Final processing - compile all questions
+#                 update_upload_progress(extraction_id, "Processing", 90, "Compiling results")
                 
-                # Aggregate results
-                all_questions = []
-                successful_files = []
-                failed_files = []
+#                 # Aggregate results
+#                 all_questions = []
+#                 successful_files = []
+#                 failed_files = []
                 
-                for result in results:
-                    if result["status"] == "success":
-                        successful_files.append(result["filename"])
-                        all_questions.extend(result["questions"])
-                    else:
-                        failed_files.append({
-                            "filename": result["filename"],
-                            "error": result.get("error", "Unknown error")
-                        })
+#                 for result in results:
+#                     if result["status"] == "success":
+#                         successful_files.append(result["filename"])
+#                         all_questions.extend(result["questions"])
+#                     else:
+#                         failed_files.append({
+#                             "filename": result["filename"],
+#                             "error": result.get("error", "Unknown error")
+#                         })
                 
-                # Store results in progress for retrieval
-                final_results = {
-                    "extraction_id": extraction_id,
-                    "org_id": org_id,
-                    "total_files": total_files,
-                    "successful_files": len(successful_files),
-                    "failed_files": len(failed_files),
-                    "total_questions": len(all_questions),
-                    "files_processed": results,
-                    "all_questions": all_questions,
-                    "file_details": {
-                        "successful": successful_files,
-                        "failed": failed_files
-                    },
-                    "processing_method": "enhanced_multimodal",
-                    "supported_types": all_supported,
-                    "timestamp": datetime.now().isoformat()
-                }
+#                 # Store results in progress for retrieval
+#                 final_results = {
+#                     "extraction_id": extraction_id,
+#                     "org_id": org_id,
+#                     "total_files": total_files,
+#                     "successful_files": len(successful_files),
+#                     "failed_files": len(failed_files),
+#                     "total_questions": len(all_questions),
+#                     "files_processed": results,
+#                     "all_questions": all_questions,
+#                     "file_details": {
+#                         "successful": successful_files,
+#                         "failed": failed_files
+#                     },
+#                     "processing_method": "enhanced_multimodal",
+#                     "supported_types": all_supported,
+#                     "timestamp": datetime.now().isoformat()
+#                 }
                 
-                # Update progress with final results
-                update_upload_progress(extraction_id, "Completed", 100, "Enhanced question extraction completed", "")
+#                 # Update progress with final results
+#                 update_upload_progress(extraction_id, "Completed", 100, "Enhanced question extraction completed", "")
                 
-                # Store results in progress data for retrieval
-                with progress_lock:
-                    if extraction_id in upload_progress:
-                        upload_progress[extraction_id]["results"] = final_results
+#                 # Store results in progress data for retrieval
+#                 with progress_lock:
+#                     if extraction_id in upload_progress:
+#                         upload_progress[extraction_id]["results"] = final_results
                 
-                print(f"✅ Enhanced question extraction completed. Total questions: {len(all_questions)}")
+#                 print(f"✅ Enhanced question extraction completed. Total questions: {len(all_questions)}")
                 
-            except Exception as e:
-                error_msg = str(e)
-                print(f"❌ Async processing error: {error_msg}")
-                traceback.print_exc()
-                update_upload_progress(extraction_id, "error", 0, f"Error: {error_msg}", "")
+#             except Exception as e:
+#                 error_msg = str(e)
+#                 print(f"❌ Async processing error: {error_msg}")
+#                 traceback.print_exc()
+#                 update_upload_progress(extraction_id, "error", 0, f"Error: {error_msg}", "")
         
-        # Start processing in background thread
-        processing_thread = Thread(target=process_files_async)
-        processing_thread.daemon = False
-        processing_thread.start()
+#         # Start processing in background thread
+#         processing_thread = Thread(target=process_files_async)
+#         processing_thread.daemon = False
+#         processing_thread.start()
         
-        return jsonify({
-            "message": "Enhanced question extraction started. Check status with the extraction-status endpoint.",
-            "extraction_id": extraction_id,
-            "org_id": org_id,
-            "files_count": len(file_data_list),
-            "processing_method": "enhanced_multimodal",
-            "supported_types": ["documents", "images", "spreadsheets", "presentations", "data_files"]
-        }), 202
+#         return jsonify({
+#             "message": "Enhanced question extraction started. Check status with the extraction-status endpoint.",
+#             "extraction_id": extraction_id,
+#             "org_id": org_id,
+#             "files_count": len(file_data_list),
+#             "processing_method": "enhanced_multimodal",
+#             "supported_types": ["documents", "images", "spreadsheets", "presentations", "data_files"]
+#         }), 202
 
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Question Extraction Error: {error_msg}")
-        traceback.print_exc()
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"❌ Question Extraction Error: {error_msg}")
+#         traceback.print_exc()
         
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+#         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
-@app.route("/extraction-status", methods=["GET", "OPTIONS"])
-def get_extraction_status():
-    """Get question extraction status and results"""
-    if request.method == "OPTIONS":
-        return "", 200
+# @app.route("/extraction-status", methods=["GET", "OPTIONS"])
+# def get_extraction_status():
+#     """Get question extraction status and results"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-    extraction_id = request.args.get("extractionId")
+#     extraction_id = request.args.get("extractionId")
     
-    if not extraction_id:
-        return jsonify({"error": "extractionId is required"}), 400
+#     if not extraction_id:
+#         return jsonify({"error": "extractionId is required"}), 400
     
-    with progress_lock:
-        exists = extraction_id in upload_progress
-        status_data = upload_progress.get(extraction_id, None)
+#     with progress_lock:
+#         exists = extraction_id in upload_progress
+#         status_data = upload_progress.get(extraction_id, None)
     
-    if not exists:
-        return jsonify({"exists": False}), 200
+#     if not exists:
+#         return jsonify({"exists": False}), 200
     
-    response_data = {
-        "exists": True,
-        "status": status_data
-    }
+#     response_data = {
+#         "exists": True,
+#         "status": status_data
+#     }
     
-    # Include results if extraction is completed
-    if status_data and status_data.get("status") == "Completed" and "results" in status_data:
-        response_data["results"] = status_data["results"]
+#     # Include results if extraction is completed
+#     if status_data and status_data.get("status") == "Completed" and "results" in status_data:
+#         response_data["results"] = status_data["results"]
     
-    return jsonify(response_data), 200
+#     return jsonify(response_data), 200
 
-@app.route("/download-questions", methods=["GET", "OPTIONS"])
-def download_questions():
-    """Download extracted questions as JSON or text file"""
-    if request.method == "OPTIONS":
-        return "", 200
+# @app.route("/download-questions", methods=["GET", "OPTIONS"])
+# def download_questions():
+#     """Download extracted questions as JSON or text file"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-    try:
-        extraction_id = request.args.get("extractionId")
-        format_type = request.args.get("format", "json")  # json or txt
+#     try:
+#         extraction_id = request.args.get("extractionId")
+#         format_type = request.args.get("format", "json")  # json or txt
         
-        if not extraction_id:
-            return jsonify({"error": "extractionId is required"}), 400
+#         if not extraction_id:
+#             return jsonify({"error": "extractionId is required"}), 400
         
-        with progress_lock:
-            status_data = upload_progress.get(extraction_id, None)
+#         with progress_lock:
+#             status_data = upload_progress.get(extraction_id, None)
         
-        if not status_data or "results" not in status_data:
-            return jsonify({"error": "No results found for this extraction ID"}), 404
+#         if not status_data or "results" not in status_data:
+#             return jsonify({"error": "No results found for this extraction ID"}), 404
         
-        results = status_data["results"]
+#         results = status_data["results"]
         
-        if format_type == "txt":
-            # Generate text format
-            content = f"Enhanced Question Extraction Results\n"
-            content += f"=" * 50 + "\n"
-            content += f"Extraction ID: {extraction_id}\n"
-            content += f"Organization: {results['org_id']}\n"
-            content += f"Processing Method: {results.get('processing_method', 'enhanced_multimodal')}\n"
-            content += f"Total Files: {results['total_files']}\n"
-            content += f"Successful Files: {results['successful_files']}\n"
-            content += f"Total Questions: {results['total_questions']}\n"
-            content += f"Timestamp: {results['timestamp']}\n\n"
+#         if format_type == "txt":
+#             # Generate text format
+#             content = f"Enhanced Question Extraction Results\n"
+#             content += f"=" * 50 + "\n"
+#             content += f"Extraction ID: {extraction_id}\n"
+#             content += f"Organization: {results['org_id']}\n"
+#             content += f"Processing Method: {results.get('processing_method', 'enhanced_multimodal')}\n"
+#             content += f"Total Files: {results['total_files']}\n"
+#             content += f"Successful Files: {results['successful_files']}\n"
+#             content += f"Total Questions: {results['total_questions']}\n"
+#             content += f"Timestamp: {results['timestamp']}\n\n"
             
-            content += "=" * 50 + "\n"
-            content += "ALL EXTRACTED QUESTIONS\n"
-            content += "=" * 50 + "\n\n"
+#             content += "=" * 50 + "\n"
+#             content += "ALL EXTRACTED QUESTIONS\n"
+#             content += "=" * 50 + "\n\n"
             
-            for i, question_obj in enumerate(results['all_questions'], 1):
-                content += f"{i}. {question_obj['question']}\n"
-                content += f"   Description: {question_obj['description']}\n\n"
+#             for i, question_obj in enumerate(results['all_questions'], 1):
+#                 content += f"{i}. {question_obj['question']}\n"
+#                 content += f"   Description: {question_obj['description']}\n\n"
             
-            content += "\n" + "=" * 50 + "\n"
-            content += "FILE PROCESSING DETAILS\n"
-            content += "=" * 50 + "\n\n"
+#             content += "\n" + "=" * 50 + "\n"
+#             content += "FILE PROCESSING DETAILS\n"
+#             content += "=" * 50 + "\n\n"
             
-            for file_result in results['files_processed']:
-                content += f"File: {file_result['filename']}\n"
-                content += f"Type: {file_result.get('file_type', 'unknown')}\n"
-                content += f"Status: {file_result['status']}\n"
-                if file_result['status'] == 'success':
-                    content += f"Questions extracted: {file_result['question_count']}\n"
-                    for q in file_result['questions']:
-                        content += f"  - {q['question']}\n"
-                        content += f"    {q['description']}\n"
-                else:
-                    content += f"Error: {file_result.get('error', 'Unknown error')}\n"
-                content += "\n"
+#             for file_result in results['files_processed']:
+#                 content += f"File: {file_result['filename']}\n"
+#                 content += f"Type: {file_result.get('file_type', 'unknown')}\n"
+#                 content += f"Status: {file_result['status']}\n"
+#                 if file_result['status'] == 'success':
+#                     content += f"Questions extracted: {file_result['question_count']}\n"
+#                     for q in file_result['questions']:
+#                         content += f"  - {q['question']}\n"
+#                         content += f"    {q['description']}\n"
+#                 else:
+#                     content += f"Error: {file_result.get('error', 'Unknown error')}\n"
+#                 content += "\n"
             
-            return Response(
-                content,
-                mimetype="text/plain",
-                headers={
-                    "Content-Disposition": f"attachment; filename=questions_{extraction_id}.txt"
-                }
-            )
-        else:
-            # Return JSON format
-            return Response(
-                json.dumps(results, indent=2),
-                mimetype="application/json",
-                headers={
-                    "Content-Disposition": f"attachment; filename=questions_{extraction_id}.json"
-                }
-            )
+#             return Response(
+#                 content,
+#                 mimetype="text/plain",
+#                 headers={
+#                     "Content-Disposition": f"attachment; filename=questions_{extraction_id}.txt"
+#                 }
+#             )
+#         else:
+#             # Return JSON format
+#             return Response(
+#                 json.dumps(results, indent=2),
+#                 mimetype="application/json",
+#                 headers={
+#                     "Content-Disposition": f"attachment; filename=questions_{extraction_id}.json"
+#                 }
+#             )
             
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Download Error: {error_msg}")
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"❌ Download Error: {error_msg}")
+#         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_file():
@@ -1898,181 +1909,182 @@ def get_upload_status():
         "status": status_data
     }), 200
 
-@app.route("/update-embedding-status", methods=["POST", "OPTIONS"])
-def update_embedding_status():
-    """Update the isFromEmbedding flag for a file in the main database"""
-    if request.method == "OPTIONS":
-        return "", 200
-        
-    try:
-        data = request.get_json(silent=True) or {}
-        file_id = data.get("fileId")
-        org_id = data.get("orgId")
-        is_from_embedding = data.get("isFromEmbedding")
-        
-        if not file_id:
-            return jsonify({"error": "fileId is required"}), 400
-            
-        if not org_id:
-            return jsonify({"error": "orgId is required"}), 400
-            
-        if not isinstance(is_from_embedding, bool):
-            return jsonify({"error": "isFromEmbedding must be a boolean"}), 400
-        
-        print(f"🔄 Manual status update for fileId: {file_id}, isFromEmbedding: {is_from_embedding}")
-        
-        # Update backend status
-        success = update_backend_embedding_status(file_id, org_id, is_from_embedding)
-        
-        if success:
-            return jsonify({
-                "message": "Embedding status updated successfully",
-                "fileId": file_id,
-                "isFromEmbedding": is_from_embedding
-            }), 200
-        else:
-            return jsonify({
-                "error": "Failed to update backend",
-                "fileId": file_id
-            }), 500
-            
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Update Status Error: {error_msg}")
-        traceback.print_exc()
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
-@app.route("/reprocess-file", methods=["POST", "OPTIONS"])
-def reprocess_file():
-    """Reprocess a file to create embeddings"""
-    if request.method == "OPTIONS":
-        return "", 200
+# @app.route("/update-embedding-status", methods=["POST", "OPTIONS"])
+# def update_embedding_status():
+#     """Update the isFromEmbedding flag for a file in the main database"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase is not available"}), 503
+#     try:
+#         data = request.get_json(silent=True) or {}
+#         file_id = data.get("fileId")
+#         org_id = data.get("orgId")
+#         is_from_embedding = data.get("isFromEmbedding")
         
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+#         if not file_id:
+#             return jsonify({"error": "fileId is required"}), 400
+            
+#         if not org_id:
+#             return jsonify({"error": "orgId is required"}), 400
+            
+#         if not isinstance(is_from_embedding, bool):
+#             return jsonify({"error": "isFromEmbedding must be a boolean"}), 400
         
-    try:
-        data = request.get_json(silent=True) or {}
-        file_id = data.get("fileId")
-        org_id = data.get("orgId")
-        file_url = data.get("fileUrl")  # URL to download the file
-        filename = data.get("filename")
+#         print(f"🔄 Manual status update for fileId: {file_id}, isFromEmbedding: {is_from_embedding}")
         
-        if not all([file_id, org_id, file_url, filename]):
-            return jsonify({"error": "fileId, orgId, fileUrl, and filename are required"}), 400
+#         # Update backend status
+#         success = update_backend_embedding_status(file_id, org_id, is_from_embedding)
         
-        print(f"🔄 Reprocessing file with enhanced processing: {filename} (fileId: {file_id})")
+#         if success:
+#             return jsonify({
+#                 "message": "Embedding status updated successfully",
+#                 "fileId": file_id,
+#                 "isFromEmbedding": is_from_embedding
+#             }), 200
+#         else:
+#             return jsonify({
+#                 "error": "Failed to update backend",
+#                 "fileId": file_id
+#             }), 500
+            
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"❌ Update Status Error: {error_msg}")
+#         traceback.print_exc()
+#         return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+# @app.route("/reprocess-file", methods=["POST", "OPTIONS"])
+# def reprocess_file():
+#     """Reprocess a file to create embeddings"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-        # Generate a new upload ID for tracking
-        upload_id = str(uuid.uuid4())
+#     if not FIREBASE_AVAILABLE:
+#         return jsonify({"error": "Firebase is not available"}), 503
         
-        def reprocess_async():
-            save_path = None
-            try:
-                update_upload_progress(upload_id, "Processing", 10, "Downloading file", filename)
+#     if not OPENAI_AVAILABLE:
+#         return jsonify({"error": "OpenAI embedding service is not available"}), 503
+        
+#     try:
+#         data = request.get_json(silent=True) or {}
+#         file_id = data.get("fileId")
+#         org_id = data.get("orgId")
+#         file_url = data.get("fileUrl")  # URL to download the file
+#         filename = data.get("filename")
+        
+#         if not all([file_id, org_id, file_url, filename]):
+#             return jsonify({"error": "fileId, orgId, fileUrl, and filename are required"}), 400
+        
+#         print(f"🔄 Reprocessing file with enhanced processing: {filename} (fileId: {file_id})")
+        
+#         # Generate a new upload ID for tracking
+#         upload_id = str(uuid.uuid4())
+        
+#         def reprocess_async():
+#             save_path = None
+#             try:
+#                 update_upload_progress(upload_id, "Processing", 10, "Downloading file", filename)
                 
-                # Download file from URL
-                file_response = requests.get(file_url, timeout=30)
-                if file_response.status_code != 200:
-                    raise Exception(f"Failed to download file: {file_response.status_code}")
+#                 # Download file from URL
+#                 file_response = requests.get(file_url, timeout=30)
+#                 if file_response.status_code != 200:
+#                     raise Exception(f"Failed to download file: {file_response.status_code}")
                 
-                # Save file temporarily
-                file_ext = filename.split(".")[-1].lower()
-                save_path = os.path.join(UPLOAD_FOLDER, f"{upload_id}_{filename}")
+#                 # Save file temporarily
+#                 file_ext = filename.split(".")[-1].lower()
+#                 save_path = os.path.join(UPLOAD_FOLDER, f"{upload_id}_{filename}")
                 
-                with open(save_path, 'wb') as f:
-                    f.write(file_response.content)
+#                 with open(save_path, 'wb') as f:
+#                     f.write(file_response.content)
                 
-                update_upload_progress(upload_id, "Processing", 30, "File downloaded", filename)
+#                 update_upload_progress(upload_id, "Processing", 30, "File downloaded", filename)
                 
-                # Extract text and create chunks
-                update_upload_progress(upload_id, "Processing", 50, "Enhanced text extraction", filename)
-                chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+#                 # Extract text and create chunks
+#                 update_upload_progress(upload_id, "Processing", 50, "Enhanced text extraction", filename)
+#                 chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
                 
-                if not chunks:
-                    print(f"❌ No content extracted from {filename}")
-                    update_upload_progress(upload_id, "error", 0, "No content extracted", filename)
-                    update_backend_embedding_status(file_id, org_id, False)
-                    return
+#                 if not chunks:
+#                     print(f"❌ No content extracted from {filename}")
+#                     update_upload_progress(upload_id, "error", 0, "No content extracted", filename)
+#                     update_backend_embedding_status(file_id, org_id, False)
+#                     return
                 
-                # Generate embeddings
-                update_upload_progress(upload_id, "Processing", 70, "Generating embeddings", filename)
-                embeddings = embed_chunks(chunks, upload_id=upload_id, org_id=org_id, filename=filename)
+#                 # Generate embeddings
+#                 update_upload_progress(upload_id, "Processing", 70, "Generating embeddings", filename)
+#                 embeddings = embed_chunks(chunks, upload_id=upload_id, org_id=org_id, filename=filename)
                 
-                # Store in Firestore
-                update_upload_progress(upload_id, "Processing", 90, "Storing embeddings", filename)
+#                 # Store in Firestore
+#                 update_upload_progress(upload_id, "Processing", 90, "Storing embeddings", filename)
                 
-                file_doc_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files").document(file_id)
+#                 file_doc_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files").document(file_id)
                 
-                # Store file metadata
-                file_doc_ref.set({
-                    "filename": filename,
-                    "file_id": file_id,
-                    "upload_id": upload_id,
-                    "file_type": file_ext,
-                    "created_at": firestore.SERVER_TIMESTAMP,
-                    "chunk_count": len(chunks),
-                    "reprocessed": True,
-                    "processing_version": "3.0.0"
-                })
+#                 # Store file metadata
+#                 file_doc_ref.set({
+#                     "filename": filename,
+#                     "file_id": file_id,
+#                     "upload_id": upload_id,
+#                     "file_type": file_ext,
+#                     "created_at": firestore.SERVER_TIMESTAMP,
+#                     "chunk_count": len(chunks),
+#                     "reprocessed": True,
+#                     "processing_version": "3.0.0"
+#                 })
                 
-                # Store chunks in batches
-                batch_size = 10
-                total_chunks = len(chunks)
+#                 # Store chunks in batches
+#                 batch_size = 10
+#                 total_chunks = len(chunks)
                 
-                for i in range(0, total_chunks, batch_size):
-                    batch = db.batch()
-                    end_idx = min(i + batch_size, total_chunks)
+#                 for i in range(0, total_chunks, batch_size):
+#                     batch = db.batch()
+#                     end_idx = min(i + batch_size, total_chunks)
                     
-                    for j in range(i, end_idx):
-                        chunk_ref = file_doc_ref.collection("chunks").document(str(j))
-                        batch.set(chunk_ref, {
-                            "content": chunks[j],
-                            "embedding": embeddings[j],
-                            "index": j
-                        })
+#                     for j in range(i, end_idx):
+#                         chunk_ref = file_doc_ref.collection("chunks").document(str(j))
+#                         batch.set(chunk_ref, {
+#                             "content": chunks[j],
+#                             "embedding": embeddings[j],
+#                             "index": j
+#                         })
                     
-                    batch.commit()
-                    del batch
-                    import gc
-                    gc.collect()
+#                     batch.commit()
+#                     del batch
+#                     import gc
+#                     gc.collect()
                 
-                print(f"✅ Successfully reprocessed file {filename} with fileId: {file_id}")
-                update_upload_progress(upload_id, "Completed", 100, "Enhanced reprocessing completed", filename)
+#                 print(f"✅ Successfully reprocessed file {filename} with fileId: {file_id}")
+#                 update_upload_progress(upload_id, "Completed", 100, "Enhanced reprocessing completed", filename)
                 
-                # Update backend status
-                update_backend_embedding_status(file_id, org_id, True)
+#                 # Update backend status
+#                 update_backend_embedding_status(file_id, org_id, True)
                 
-            except Exception as e:
-                error_msg = str(e)
-                print(f"❌ Reprocessing error: {error_msg}")
-                update_upload_progress(upload_id, "error", 0, f"Error: {error_msg}", filename)
-                update_backend_embedding_status(file_id, org_id, False)
+#             except Exception as e:
+#                 error_msg = str(e)
+#                 print(f"❌ Reprocessing error: {error_msg}")
+#                 update_upload_progress(upload_id, "error", 0, f"Error: {error_msg}", filename)
+#                 update_backend_embedding_status(file_id, org_id, False)
                 
-            finally:
-                if save_path and os.path.exists(save_path):
-                    try:
-                        os.remove(save_path)
-                    except Exception as e:
-                        print(f"Error deleting file: {e}")
+#             finally:
+#                 if save_path and os.path.exists(save_path):
+#                     try:
+#                         os.remove(save_path)
+#                     except Exception as e:
+#                         print(f"Error deleting file: {e}")
         
-        # Start reprocessing in background
-        Thread(target=reprocess_async, daemon=False).start()
+#         # Start reprocessing in background
+#         Thread(target=reprocess_async, daemon=False).start()
         
-        return jsonify({
-            "message": "Enhanced file reprocessing started",
-            "fileId": file_id,
-            "upload_id": upload_id,
-            "processing_version": "3.0.0"
-        }), 202
+#         return jsonify({
+#             "message": "Enhanced file reprocessing started",
+#             "fileId": file_id,
+#             "upload_id": upload_id,
+#             "processing_version": "3.0.0"
+#         }), 202
         
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Reprocess Error: {error_msg}")
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"❌ Reprocess Error: {error_msg}")
+#         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
 @app.route("/delete", methods=["DELETE", "OPTIONS"])
 def delete_file_by_file_id():
@@ -2172,233 +2184,233 @@ def delete_file_by_file_id():
             "details": error_msg
         }), 500
 
-@app.route("/cleanup-orphaned", methods=["POST", "OPTIONS"])
-def cleanup_orphaned_embeddings():
-    """Clean up orphaned embeddings using fileIds from database"""
-    if request.method == "OPTIONS":
-        return "", 200
+# @app.route("/cleanup-orphaned", methods=["POST", "OPTIONS"])
+# def cleanup_orphaned_embeddings():
+#     """Clean up orphaned embeddings using fileIds from database"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase is not available"}), 503
+#     if not FIREBASE_AVAILABLE:
+#         return jsonify({"error": "Firebase is not available"}), 503
         
-    try:
-        data = request.get_json(silent=True) or {}
-        org_id = data.get("orgId")
-        active_file_ids = data.get("activeFileIds", [])
+#     try:
+#         data = request.get_json(silent=True) or {}
+#         org_id = data.get("orgId")
+#         active_file_ids = data.get("activeFileIds", [])
         
-        if not org_id:
-            return jsonify({"error": "orgId is required"}), 400
+#         if not org_id:
+#             return jsonify({"error": "orgId is required"}), 400
             
-        print(f"🧹 Starting enhanced cleanup for org: {org_id}")
-        print(f"📋 Active fileIds to preserve: {len(active_file_ids)}")
+#         print(f"🧹 Starting enhanced cleanup for org: {org_id}")
+#         print(f"📋 Active fileIds to preserve: {len(active_file_ids)}")
         
-        files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
-        all_firestore_files = files_ref.stream()
+#         files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+#         all_firestore_files = files_ref.stream()
         
-        orphaned_files = []
-        preserved_files = []
+#         orphaned_files = []
+#         preserved_files = []
         
-        for file_doc in all_firestore_files:
-            doc_id = file_doc.id
-            file_data = file_doc.to_dict()
+#         for file_doc in all_firestore_files:
+#             doc_id = file_doc.id
+#             file_data = file_doc.to_dict()
             
-            stored_file_id = file_data.get("file_id")
+#             stored_file_id = file_data.get("file_id")
             
-            is_active = (
-                doc_id in active_file_ids or 
-                stored_file_id in active_file_ids
-            )
+#             is_active = (
+#                 doc_id in active_file_ids or 
+#                 stored_file_id in active_file_ids
+#             )
             
-            if not is_active:
-                print(f"🗑️ Found orphaned file: {doc_id} ({file_data.get('filename', 'unknown')})")
+#             if not is_active:
+#                 print(f"🗑️ Found orphaned file: {doc_id} ({file_data.get('filename', 'unknown')})")
                 
-                chunks_deleted = delete_collection(file_doc.reference.collection("chunks"), 100)
-                file_doc.reference.delete()
+#                 chunks_deleted = delete_collection(file_doc.reference.collection("chunks"), 100)
+#                 file_doc.reference.delete()
                 
-                orphaned_files.append({
-                    "document_id": doc_id,
-                    "file_id": stored_file_id,
-                    "filename": file_data.get("filename", "unknown"),
-                    "file_type": file_data.get("file_type", "unknown"),
-                    "processing_version": file_data.get("processing_version", "legacy"),
-                    "chunks_deleted": chunks_deleted
-                })
+#                 orphaned_files.append({
+#                     "document_id": doc_id,
+#                     "file_id": stored_file_id,
+#                     "filename": file_data.get("filename", "unknown"),
+#                     "file_type": file_data.get("file_type", "unknown"),
+#                     "processing_version": file_data.get("processing_version", "legacy"),
+#                     "chunks_deleted": chunks_deleted
+#                 })
                 
-                # Update backend status
-                if stored_file_id:
-                    update_backend_embedding_status(stored_file_id, org_id, False)
+#                 # Update backend status
+#                 if stored_file_id:
+#                     update_backend_embedding_status(stored_file_id, org_id, False)
                     
-            else:
-                preserved_files.append({
-                    "document_id": doc_id,
-                    "file_id": stored_file_id,
-                    "filename": file_data.get("filename", "unknown"),
-                    "processing_version": file_data.get("processing_version", "legacy")
-                })
+#             else:
+#                 preserved_files.append({
+#                     "document_id": doc_id,
+#                     "file_id": stored_file_id,
+#                     "filename": file_data.get("filename", "unknown"),
+#                     "processing_version": file_data.get("processing_version", "legacy")
+#                 })
         
-        print(f"✅ Enhanced cleanup complete. Deleted {len(orphaned_files)} orphaned files, preserved {len(preserved_files)} active files")
+#         print(f"✅ Enhanced cleanup complete. Deleted {len(orphaned_files)} orphaned files, preserved {len(preserved_files)} active files")
         
-        return jsonify({
-            "message": f"Enhanced cleanup complete for org {org_id}",
-            "orphaned_files_deleted": len(orphaned_files),
-            "active_files_preserved": len(preserved_files),
-            "deletion_details": orphaned_files,
-            "cleanup_version": "3.0.0"
-        }), 200
+#         return jsonify({
+#             "message": f"Enhanced cleanup complete for org {org_id}",
+#             "orphaned_files_deleted": len(orphaned_files),
+#             "active_files_preserved": len(preserved_files),
+#             "deletion_details": orphaned_files,
+#             "cleanup_version": "3.0.0"
+#         }), 200
         
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Cleanup Error: {error_msg}")
-        traceback.print_exc()
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"❌ Cleanup Error: {error_msg}")
+#         traceback.print_exc()
+#         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
-@app.route("/files", methods=["GET", "OPTIONS"])
-def list_files():
-    """List all files for an organization with enhanced fileId information"""
-    if request.method == "OPTIONS":
-        return "", 200
+# @app.route("/files", methods=["GET", "OPTIONS"])
+# def list_files():
+#     """List all files for an organization with enhanced fileId information"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase is not available"}), 503
+#     if not FIREBASE_AVAILABLE:
+#         return jsonify({"error": "Firebase is not available"}), 503
         
-    try:
-        org_id = request.args.get("orgId")
+#     try:
+#         org_id = request.args.get("orgId")
         
-        if not org_id:
-            return jsonify({"error": "orgId is required"}), 400
+#         if not org_id:
+#             return jsonify({"error": "orgId is required"}), 400
         
-        files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
-        files_docs = files_ref.stream()
+#         files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+#         files_docs = files_ref.stream()
         
-        files = []
-        for doc in files_docs:
-            file_data = doc.to_dict()
-            files.append({
-                "document_id": doc.id,
-                "file_id": file_data.get("file_id"),
-                "upload_id": file_data.get("upload_id"),
-                "filename": file_data.get("filename"),
-                "file_type": file_data.get("file_type"),
-                "created_at": file_data.get("created_at"),
-                "chunk_count": file_data.get("chunk_count"),
-                "reprocessed": file_data.get("reprocessed", False),
-                "processing_version": file_data.get("processing_version", "legacy")
-            })
+#         files = []
+#         for doc in files_docs:
+#             file_data = doc.to_dict()
+#             files.append({
+#                 "document_id": doc.id,
+#                 "file_id": file_data.get("file_id"),
+#                 "upload_id": file_data.get("upload_id"),
+#                 "filename": file_data.get("filename"),
+#                 "file_type": file_data.get("file_type"),
+#                 "created_at": file_data.get("created_at"),
+#                 "chunk_count": file_data.get("chunk_count"),
+#                 "reprocessed": file_data.get("reprocessed", False),
+#                 "processing_version": file_data.get("processing_version", "legacy")
+#             })
         
-        return jsonify({
-            "org_id": org_id,
-            "total_files": len(files),
-            "files": files,
-            "api_version": "3.0.0"
-        }), 200
+#         return jsonify({
+#             "org_id": org_id,
+#             "total_files": len(files),
+#             "files": files,
+#             "api_version": "3.0.0"
+#         }), 200
         
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ List Files Error: {error_msg}")
-        traceback.print_exc()
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"❌ List Files Error: {error_msg}")
+#         traceback.print_exc()
+#         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
-@app.route("/migrate-to-fileid", methods=["POST", "OPTIONS"])
-def migrate_to_file_id():
-    """Migrate existing uploadId-based documents to fileId-based system"""
-    if request.method == "OPTIONS":
-        return "", 200
+# @app.route("/migrate-to-fileid", methods=["POST", "OPTIONS"])
+# def migrate_to_file_id():
+#     """Migrate existing uploadId-based documents to fileId-based system"""
+#     if request.method == "OPTIONS":
+#         return "", 200
         
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase is not available"}), 503
+#     if not FIREBASE_AVAILABLE:
+#         return jsonify({"error": "Firebase is not available"}), 503
         
-    try:
-        data = request.get_json(silent=True) or {}
-        org_id = data.get("orgId")
-        file_mappings = data.get("fileMappings", [])
+#     try:
+#         data = request.get_json(silent=True) or {}
+#         org_id = data.get("orgId")
+#         file_mappings = data.get("fileMappings", [])
         
-        if not org_id:
-            return jsonify({"error": "orgId is required"}), 400
+#         if not org_id:
+#             return jsonify({"error": "orgId is required"}), 400
             
-        print(f"🔄 Starting enhanced migration for org: {org_id}")
+#         print(f"🔄 Starting enhanced migration for org: {org_id}")
         
-        files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
-        migration_results = []
+#         files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+#         migration_results = []
         
-        for mapping in file_mappings:
-            upload_id = mapping.get("uploadId")
-            file_id = mapping.get("fileId")
+#         for mapping in file_mappings:
+#             upload_id = mapping.get("uploadId")
+#             file_id = mapping.get("fileId")
             
-            if not upload_id or not file_id:
-                continue
+#             if not upload_id or not file_id:
+#                 continue
                 
-            try:
-                old_doc_ref = files_ref.document(upload_id)
-                old_doc = old_doc_ref.get()
+#             try:
+#                 old_doc_ref = files_ref.document(upload_id)
+#                 old_doc = old_doc_ref.get()
                 
-                if old_doc.exists:
-                    old_data = old_doc.to_dict()
+#                 if old_doc.exists:
+#                     old_data = old_doc.to_dict()
                     
-                    new_doc_ref = files_ref.document(file_id)
+#                     new_doc_ref = files_ref.document(file_id)
                     
-                    new_data = old_data.copy()
-                    new_data["file_id"] = file_id
-                    new_data["processing_version"] = "3.0.0"
-                    new_data["migrated"] = True
+#                     new_data = old_data.copy()
+#                     new_data["file_id"] = file_id
+#                     new_data["processing_version"] = "3.0.0"
+#                     new_data["migrated"] = True
                     
-                    new_doc_ref.set(new_data)
+#                     new_doc_ref.set(new_data)
                     
-                    old_chunks = old_doc_ref.collection("chunks").stream()
-                    batch = db.batch()
-                    chunks_copied = 0
+#                     old_chunks = old_doc_ref.collection("chunks").stream()
+#                     batch = db.batch()
+#                     chunks_copied = 0
                     
-                    for chunk_doc in old_chunks:
-                        new_chunk_ref = new_doc_ref.collection("chunks").document(chunk_doc.id)
-                        batch.set(new_chunk_ref, chunk_doc.to_dict())
-                        chunks_copied += 1
+#                     for chunk_doc in old_chunks:
+#                         new_chunk_ref = new_doc_ref.collection("chunks").document(chunk_doc.id)
+#                         batch.set(new_chunk_ref, chunk_doc.to_dict())
+#                         chunks_copied += 1
                     
-                    batch.commit()
+#                     batch.commit()
                     
-                    delete_collection(old_doc_ref.collection("chunks"), 100)
-                    old_doc_ref.delete()
+#                     delete_collection(old_doc_ref.collection("chunks"), 100)
+#                     old_doc_ref.delete()
                     
-                    # Update backend status
-                    update_backend_embedding_status(file_id, org_id, True)
+#                     # Update backend status
+#                     update_backend_embedding_status(file_id, org_id, True)
                     
-                    migration_results.append({
-                        "upload_id": upload_id,
-                        "file_id": file_id,
-                        "filename": old_data.get("filename"),
-                        "chunks_migrated": chunks_copied,
-                        "processing_version": "3.0.0",
-                        "success": True
-                    })
+#                     migration_results.append({
+#                         "upload_id": upload_id,
+#                         "file_id": file_id,
+#                         "filename": old_data.get("filename"),
+#                         "chunks_migrated": chunks_copied,
+#                         "processing_version": "3.0.0",
+#                         "success": True
+#                     })
                     
-                    print(f"✅ Migrated {upload_id} -> {file_id} ({chunks_copied} chunks)")
+#                     print(f"✅ Migrated {upload_id} -> {file_id} ({chunks_copied} chunks)")
                     
-            except Exception as e:
-                migration_results.append({
-                    "upload_id": upload_id,
-                    "file_id": file_id,
-                    "success": False,
-                    "error": str(e)
-                })
-                print(f"❌ Failed to migrate {upload_id} -> {file_id}: {str(e)}")
+#             except Exception as e:
+#                 migration_results.append({
+#                     "upload_id": upload_id,
+#                     "file_id": file_id,
+#                     "success": False,
+#                     "error": str(e)
+#                 })
+#                 print(f"❌ Failed to migrate {upload_id} -> {file_id}: {str(e)}")
         
-        successful_migrations = len([r for r in migration_results if r["success"]])
+#         successful_migrations = len([r for r in migration_results if r["success"]])
         
-        return jsonify({
-            "message": f"Enhanced migration complete for org {org_id}",
-            "total_attempted": len(file_mappings),
-            "successful_migrations": successful_migrations,
-            "migration_details": migration_results,
-            "migration_version": "3.0.0"
-        }), 200
+#         return jsonify({
+#             "message": f"Enhanced migration complete for org {org_id}",
+#             "total_attempted": len(file_mappings),
+#             "successful_migrations": successful_migrations,
+#             "migration_details": migration_results,
+#             "migration_version": "3.0.0"
+#         }), 200
         
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Migration Error: {error_msg}")
-        traceback.print_exc()
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"❌ Migration Error: {error_msg}")
+#         traceback.print_exc()
+#         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
 @app.route("/chat", methods=["POST", "OPTIONS"])
 def chat_with_doc():
-    """Chat with documents using embeddings and AI"""
+    """Chat with documents using embeddings and AI - UNIVERSAL SEARCH (org + all RFP documents)"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -2423,29 +2435,33 @@ def chat_with_doc():
         if not query or not org_id:
             return jsonify({"error": "Query and orgId are required."}), 400
 
-        print(f"🔍 Processing enhanced chat query: '{query}' for org: {org_id}")
+        print(f"🔍 Processing UNIVERSAL chat query: '{query}' for org: {org_id}")
+        print(f"🌐 Searching organization documents AND all RFP support documents")
 
         # Get query embedding
         query_embedding = np.array(embed_query(query))
 
-        # Get files for this organization
+        retrieved_docs = []
+        search_sources = []
+
+        # PART 1: Search organization-level documents (global knowledge base)
+        print("📚 Searching organization-level documents...")
         org_files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
         
         if file_ids:
-            # Search only specific files
-            files = []
+            # Search only specific files if provided
+            org_files = []
             for file_id in file_ids:
                 doc = org_files_ref.document(file_id).get()
                 if doc.exists:
-                    files.append(doc)
+                    org_files.append(doc)
         else:
-            # Search all files
-            files = org_files_ref.stream()
+            # Search all organization files
+            org_files = org_files_ref.stream()
         
-        retrieved_docs = []
-        
-        # Process each file
-        for file_doc in files:
+        org_docs_found = 0
+        # Process each organization file
+        for file_doc in org_files:
             file_data = file_doc.to_dict()
             
             # Get chunks for this file
@@ -2471,40 +2487,307 @@ def chat_with_doc():
                         "filename": file_data.get("filename", "Unknown"),
                         "file_id": file_data.get("file_id", file_doc.id),
                         "file_type": file_data.get("file_type", "unknown"),
-                        "processing_version": file_data.get("processing_version", "legacy")
+                        "processing_version": file_data.get("processing_version", "legacy"),
+                        "document_source": "organization",
+                        "source_type": "global"
                     })
+                    org_docs_found += 1
 
-        # Get top chunks by similarity
-        top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
+        search_sources.append({
+            "source": "organization",
+            "type": "global", 
+            "documents_found": org_docs_found,
+            "collection": f"document_embeddings/org-{org_id}/files"
+        })
+
+        # PART 2: Search ALL RFP support documents for this organization
+        rfp_docs_found = 0
+        rfps_searched = []
+        
+        try:
+            print(f"🎯 Searching ALL RFP support documents for organization: {org_id}...")
+            
+            # Try the new org-based structure first - use org-{org_id} format
+            org_rfp_support_ref = (db.collection("org_rfp_support_embeddings")
+                                 .document(f"org-{org_id}")
+                                 .collection("rfps"))
+            
+            try:
+                # Since /chat-rfp works, let's debug the difference in data access patterns
+                print(f"🔧 Testing Firebase connection (since /chat-rfp works, this should work too)...")
+                
+                # Test the exact same path that /chat-rfp uses (pick a known RFP ID)
+                print(f"🧪 Testing /chat-rfp style access...")
+                test_rfp_id = "b0b0755d-b32f-4fed-83a5-04bf3f86c8e2"  # From your Firestore screenshot
+                
+                try:
+                    # Test direct access like /chat-rfp does
+                    test_rfp_files_ref = (db.collection("org_rfp_support_embeddings")
+                                         .document(f"org-{org_id}")
+                                         .collection("rfps")
+                                         .document(f"rfp-{test_rfp_id}")
+                                         .collection("files"))
+                    
+                    test_files = list(test_rfp_files_ref.stream())
+                    print(f"✅ Direct RFP access (/chat-rfp style): Found {len(test_files)} files")
+                    
+                    if len(test_files) > 0:
+                        print(f"📄 Sample file: {test_files[0].id}")
+                        
+                        # Test chunk access too
+                        test_chunks = list(test_files[0].reference.collection("chunks").limit(2).stream())
+                        print(f"📝 Sample chunks: {len(test_chunks)} chunks found")
+                    
+                except Exception as direct_test_error:
+                    print(f"❌ Direct RFP access failed: {str(direct_test_error)}")
+                
+                # Now test the problematic approach that /chat uses
+                print(f"🧪 Testing /chat style access (listing all RFPs)...")
+                
+                # Check if the parent org document exists and has data
+                org_doc = db.collection("org_rfp_support_embeddings").document(f"org-{org_id}").get()
+                print(f"🔍 Parent org document exists: {org_doc.exists}")
+                
+                if org_doc.exists:
+                    doc_data = org_doc.to_dict()
+                    print(f"📄 Parent document data: {doc_data}")
+                else:
+                    print(f"⚠️ Parent document doesn't exist - this might be the issue!")
+                
+                # Try different ways to access the rfps subcollection
+                try:
+                    # Method 1: Direct subcollection access
+                    rfps_ref = (db.collection("org_rfp_support_embeddings")
+                              .document(f"org-{org_id}")
+                              .collection("rfps"))
+                    
+                    print(f"🔍 Attempting to list RFPs in subcollection...")
+                    all_rfps = list(rfps_ref.stream())
+                    print(f"📊 Method 1 - Found {len(all_rfps)} RFP documents")
+                    
+                    if len(all_rfps) > 0:
+                        print(f"📋 RFP document IDs: {[doc.id for doc in all_rfps]}")
+                    
+                except Exception as method1_error:
+                    print(f"❌ Method 1 failed: {str(method1_error)}")
+                
+                try:
+                    # Method 2: Using collection group query
+                    print(f"🔍 Trying collection group query...")
+                    rfps_group = db.collection_group("rfps").where("org_id", "==", org_id).limit(10)
+                    group_rfps = list(rfps_group.stream())
+                    print(f"📊 Method 2 - Collection group found {len(group_rfps)} RFP documents")
+                    
+                except Exception as method2_error:
+                    print(f"❌ Method 2 failed: {str(method2_error)}")
+                
+                try:
+                    # Method 3: Check if we can manually construct the path
+                    manual_rfp_ref = db.collection("org_rfp_support_embeddings").document(f"org-{org_id}").collection("rfps").document(f"rfp-{test_rfp_id}")
+                    manual_rfp_doc = manual_rfp_ref.get()
+                    print(f"📊 Method 3 - Manual RFP document exists: {manual_rfp_doc.exists}")
+                    
+                    if manual_rfp_doc.exists:
+                        manual_data = manual_rfp_doc.to_dict()
+                        print(f"📄 Manual RFP document data: {manual_data}")
+                    
+                except Exception as method3_error:
+                    print(f"❌ Method 3 failed: {str(method3_error)}")
+                
+                # Debug the exact structure
+                print(f"🏗️ Structure comparison:")
+                print(f"   /chat-rfp path: org_rfp_support_embeddings/{f'org-{org_id}'}/rfps/rfp-{test_rfp_id}/files")
+                print(f"   /chat path: org_rfp_support_embeddings/{f'org-{org_id}'}/rfps/* (list all)")
+                
+                target_doc_id = f"org-{org_id}"
+                print(f"🎯 Target org document: {target_doc_id}")
+                
+                # Get all RFP documents for this organization
+                all_org_rfps = list(org_rfp_support_ref.stream())
+                print(f"📊 Found {len(all_org_rfps)} RFP documents in org structure")
+                
+                for rfp_doc in all_org_rfps:
+                    rfp_doc_id = rfp_doc.id
+                    print(f"🔍 Processing RFP document: {rfp_doc_id}")
+                    
+                    # Handle both formats: rfp-{rfp_id} and {rfp_id}
+                    if rfp_doc_id.startswith("rfp-"):
+                        current_rfp_id = rfp_doc_id.replace("rfp-", "")
+                    else:
+                        current_rfp_id = rfp_doc_id
+                    
+                    rfps_searched.append(current_rfp_id)
+                    
+                    print(f"  🔍 Searching RFP support docs for RFP: {current_rfp_id} (doc_id: {rfp_doc_id})")
+                    
+                    # Get files for this RFP
+                    rfp_files_ref = rfp_doc.reference.collection("files")
+                    rfp_files = list(rfp_files_ref.stream())
+                    
+                    print(f"    📁 Found {len(rfp_files)} files in RFP {current_rfp_id}")
+                    
+                    rfp_specific_docs = 0
+                    
+                    # Process each file in this RFP
+                    for file_doc in rfp_files:
+                        file_data = file_doc.to_dict()
+                        
+                        # Get chunks for this file
+                        chunks_ref = file_doc.reference.collection("chunks")
+                        chunks = list(chunks_ref.stream())
+                        
+                        print(f"      📄 File: {file_data.get('filename', 'Unknown')} has {len(chunks)} chunks")
+                        
+                        # Process each chunk
+                        for chunk_doc in chunks:
+                            chunk_data = chunk_doc.to_dict()
+                            
+                            # Convert to numpy array
+                            chunk_embedding = np.array(chunk_data["embedding"])
+                            
+                            # Calculate cosine similarity
+                            score = np.dot(query_embedding, chunk_embedding) / (
+                                np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
+                            )
+                            
+                            if score >= 0.2:  # Similarity threshold
+                                retrieved_docs.append({
+                                    "content": chunk_data["content"], 
+                                    "score": float(score),
+                                    "filename": file_data.get("filename", "Unknown"),
+                                    "file_id": file_data.get("file_id", file_doc.id),
+                                    "file_type": file_data.get("file_type", "unknown"),
+                                    "processing_version": file_data.get("processing_version", "legacy"),
+                                    "document_source": "rfp_support",
+                                    "source_type": "rfp_specific",
+                                    "rfp_id": current_rfp_id
+                                })
+                                rfp_docs_found += 1
+                                rfp_specific_docs += 1
+                        
+                        if rfp_specific_docs > 0:
+                            print(f"    ✅ Found {rfp_specific_docs} relevant chunks in RFP {current_rfp_id}")
+                
+                # Also try the old structure if no results found
+                if len(all_org_rfps) == 0:
+                    print(f"⚠️ No RFPs found in new structure, trying old structure...")
+                    
+                    # Try the old structure: direct RFP collections
+                    old_structure_ref = db.collection("org_rfp_support_embeddings")
+                    old_docs = list(old_structure_ref.limit(10).stream())
+                    
+                    print(f"📊 Found {len(old_docs)} documents in old structure")
+                    
+                    for doc in old_docs:
+                        doc_id = doc.id
+                        if doc_id.startswith(f"rfp-"):
+                            # Extract org and rfp from document ID if it contains org info
+                            print(f"🔍 Checking old structure doc: {doc_id}")
+                            
+                            # Try to access files directly
+                            old_files_ref = doc.reference.collection("files")
+                            old_files = list(old_files_ref.stream())
+                            
+                            if len(old_files) > 0:
+                                print(f"    📁 Found {len(old_files)} files in old structure doc {doc_id}")
+                                # Process these files similar to above...
+                
+                if rfp_docs_found > 0:
+                    search_sources.append({
+                        "source": "rfp_support", 
+                        "type": "all_rfps",
+                        "rfps_searched": rfps_searched,
+                        "total_rfps": len(rfps_searched),
+                        "documents_found": rfp_docs_found,
+                        "collection": f"org_rfp_support_embeddings/org-{org_id}/rfps/*"
+                    })
+                    
+            except Exception as rfp_search_error:
+                print(f"⚠️ Error searching organization RFP support documents: {str(rfp_search_error)}")
+                traceback.print_exc()
+                # Continue with just organization documents
+                
+        except Exception as rfp_access_error:
+            print(f"⚠️ Error accessing RFP support collection: {str(rfp_access_error)}")
+            traceback.print_exc()
+            # Continue with just organization documents
+
+        # Get top chunks by similarity (from all sources combined)
+        top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:10]
 
         if not top_chunks:
-            # No relevant chunks found
+            # No relevant chunks found in any source
+            search_summary = {
+                "organization_docs": org_docs_found,
+                "rfp_docs": rfp_docs_found,
+                "total_sources": len(search_sources),
+                "rfps_searched": len(rfps_searched)
+            }
+            
+            no_results_message = f"I couldn't find any relevant information in the uploaded documents to answer your question."
+            no_results_message += f" I searched your organization's knowledge base and RFP support documents across {len(rfps_searched)} RFPs."
+            no_results_message += " Please make sure you have uploaded documents that contain information related to your query."
+            
             return jsonify({
                 "query": query, 
                 "retrieved_chunks": [], 
-                "answer": "I couldn't find any relevant information in the uploaded documents to answer your question. Please make sure you have uploaded documents that contain information related to your query.",
+                "answer": no_results_message,
                 "source_files": [],
                 "relevance_scores": [],
-                "chat_type": "global"
+                "chat_type": "universal",
+                "search_sources": search_sources,
+                "search_summary": search_summary,
+                "api_version": "4.2.0"
             }), 200
 
-        # Generate answer
+        # Generate answer using combined context
         context_chunks = [doc["content"] for doc in top_chunks]
         answer = generate_answer_with_gcp(query, context_chunks)
         
-        # Get unique source files with types
+        # Get unique source files with enhanced information
         source_files = []
         seen_files = set()
+        org_files = []
+        rfp_files = []
+        
         for doc in top_chunks:
-            file_key = f"{doc['filename']}_{doc['file_type']}"
+            file_key = f"{doc['filename']}_{doc['file_type']}_{doc['document_source']}_{doc.get('rfp_id', 'none')}"
             if file_key not in seen_files:
-                source_files.append({
+                file_info = {
                     "filename": doc["filename"],
                     "file_type": doc["file_type"],
                     "file_id": doc["file_id"],
-                    "processing_version": doc["processing_version"]
-                })
+                    "processing_version": doc["processing_version"],
+                    "document_source": doc["document_source"],
+                    "source_type": doc["source_type"]
+                }
+                
+                # Add RFP ID if it's an RFP document
+                if doc["document_source"] == "rfp_support":
+                    file_info["rfp_id"] = doc.get("rfp_id")
+                    rfp_files.append(file_info)
+                else:
+                    org_files.append(file_info)
+                
+                source_files.append(file_info)
                 seen_files.add(file_key)
+
+        # Create search summary
+        search_summary = {
+            "total_chunks_found": len(retrieved_docs),
+            "top_chunks_used": len(top_chunks),
+            "organization_files": len(org_files),
+            "rfp_files": len(rfp_files),
+            "sources_searched": len(search_sources),
+            "rfps_searched": len(rfps_searched),
+            "search_scope": "all_available_org_documents"
+        }
+
+        print(f"✅ Universal search completed:")
+        print(f"  Organization documents: {org_docs_found} chunks from {len(org_files)} files")
+        print(f"  RFP documents: {rfp_docs_found} chunks from {len(rfp_files)} files across {len(rfps_searched)} RFPs")
+        print(f"  Total relevant chunks: {len(retrieved_docs)}")
+        print(f"  Used for answer: {len(top_chunks)}")
 
         return jsonify({
             "query": query, 
@@ -2512,22 +2795,30 @@ def chat_with_doc():
             "answer": answer,
             "source_files": source_files,
             "relevance_scores": [doc["score"] for doc in top_chunks],
-            "chat_type": "global",
-            "api_version": "3.0.0"
+            "chat_type": "universal",
+            "search_sources": search_sources,
+            "search_summary": search_summary,
+            "source_breakdown": {
+                "organization_files": org_files,
+                "rfp_files": rfp_files
+            },
+            "rfps_searched": rfps_searched,
+            "api_version": "4.2.0"
         }), 200
 
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ Chat Error: {error_msg}")
+        print(f"❌ Universal Chat Error: {error_msg}")
         traceback.print_exc()
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
+    
 # ================================
 # RFP SUPPORT DOCUMENT ENDPOINTS
 # ================================
 
 @app.route("/upload-support-document", methods=["POST", "OPTIONS"])
 def upload_support_document():
-    """Upload and process a support document for a specific RFP"""
+    """Upload and process a support document for a specific RFP (organized by orgId)"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -2544,7 +2835,7 @@ def upload_support_document():
         file_id = request.args.get("fileId")
         upload_id = request.args.get("uploadId", str(uuid.uuid4()))
         
-        print(f"📄 Starting RFP support document upload - RFP: {rfp_id}, fileId: {file_id}, uploadId: {upload_id}")
+        print(f"📄 Starting RFP support document upload - Org: {org_id}, RFP: {rfp_id}, fileId: {file_id}, uploadId: {upload_id}")
         
         if not org_id:
             return jsonify({"error": "orgId is required"}), 400
@@ -2599,11 +2890,40 @@ def upload_support_document():
                 update_upload_progress(upload_id, "Processing", 50, "Generating embeddings", filename)
                 embeddings = embed_chunks(chunks, upload_id=upload_id, org_id=org_id, filename=filename)
                 
-                # Store in RFP-specific Firestore collection
+                # Store in NEW RFP-specific Firestore collection structure
+                update_upload_progress(upload_id, "Processing", 75, "Creating document structure", filename)
+                
+                # STEP 1: Create/update the ORG parent document
+                print(f"🏗️ Creating org parent document: org-{org_id}")
+                org_doc_ref = db.collection("org_rfp_support_embeddings").document(f"org-{org_id}")
+                org_doc_ref.set({
+                    "org_id": org_id,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "last_updated": firestore.SERVER_TIMESTAMP,
+                    "rfp_count": firestore.Increment(1)  # Increment RFP count
+                }, merge=True)  # Use merge=True to not overwrite existing data
+                
+                print(f"✅ Created/updated org parent document: org-{org_id}")
+                
+                # STEP 2: Create/update the RFP parent document  
+                print(f"🏗️ Creating RFP parent document: rfp-{rfp_id}")
+                rfp_parent_ref = org_doc_ref.collection("rfps").document(f"rfp-{rfp_id}")
+                rfp_parent_ref.set({
+                    "rfp_id": rfp_id,
+                    "org_id": org_id,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "last_updated": firestore.SERVER_TIMESTAMP,
+                    "file_count": firestore.Increment(1)  # Increment file count
+                }, merge=True)  # Use merge=True to not overwrite existing data
+                
+                print(f"✅ Created/updated RFP parent document: rfp-{rfp_id}")
+                
+                # STEP 3: Create the file document
                 update_upload_progress(upload_id, "Processing", 80, "Storing RFP support document embeddings", filename)
                 
-                # Store in separate RFP support documents collection
-                rfp_doc_ref = db.collection("rfp_support_embeddings").document(f"rfp-{rfp_id}").collection("files").document(file_id)
+                rfp_doc_ref = rfp_parent_ref.collection("files").document(file_id)
+                
+                print(f"🗂️ Storing document at: org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files/{file_id}")
                 
                 # Store file metadata
                 rfp_doc_ref.set({
@@ -2616,10 +2936,14 @@ def upload_support_document():
                     "document_type": "support",
                     "created_at": firestore.SERVER_TIMESTAMP,
                     "chunk_count": len(chunks),
-                    "processing_version": "4.0.0"
+                    "processing_version": "4.2.0"  # Updated version for fixed structure
                 })
                 
-                # Store chunks in batches
+                print(f"✅ Created file document: {file_id}")
+                
+                # STEP 4: Store chunks in batches
+                update_upload_progress(upload_id, "Processing", 85, "Storing embeddings", filename)
+                
                 batch_size = 10
                 total_chunks = len(chunks)
                 
@@ -2640,11 +2964,30 @@ def upload_support_document():
                     import gc
                     gc.collect()
                     
-                    progress = 80 + ((end_idx / total_chunks) * 20)
+                    progress = 85 + ((end_idx / total_chunks) * 15)
                     update_upload_progress(upload_id, "Processing", progress, 
                                         f"Storing chunks ({end_idx}/{total_chunks})", filename)
                 
-                print(f"✅ Successfully processed RFP support document {filename} for RFP: {rfp_id}")
+                print(f"✅ Successfully processed RFP support document {filename} for Org: {org_id}, RFP: {rfp_id}")
+                print(f"📊 Created complete structure: org-{org_id}/rfps/rfp-{rfp_id}/files/{file_id} with {len(chunks)} chunks")
+                
+                # STEP 5: Verify the structure was created correctly
+                try:
+                    # Verify we can now list RFPs
+                    verification_rfps = list(org_doc_ref.collection("rfps").stream())
+                    print(f"✅ Verification: Can list {len(verification_rfps)} RFPs for org")
+                    
+                    # Verify RFP document exists
+                    rfp_exists = rfp_parent_ref.get().exists
+                    print(f"✅ Verification: RFP document exists: {rfp_exists}")
+                    
+                    # Verify file document exists
+                    file_exists = rfp_doc_ref.get().exists
+                    print(f"✅ Verification: File document exists: {file_exists}")
+                    
+                except Exception as verification_error:
+                    print(f"⚠️ Verification failed (but upload succeeded): {str(verification_error)}")
+                
                 update_upload_progress(upload_id, "Completed", 100, "RFP support document processing completed", filename)
                 
                 # Update backend to mark file as having embeddings
@@ -2675,9 +3018,12 @@ def upload_support_document():
             "file_id": file_id,
             "upload_id": upload_id,
             "rfp_id": rfp_id,
+            "org_id": org_id,
             "file_type": file_ext,
             "document_type": "support",
-            "processing_version": "4.0.0"
+            "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files/{file_id}",
+            "processing_version": "4.2.0",
+            "structure_fix": "Creates parent documents for proper subcollection listing"
         }), 202
 
     except Exception as e:
@@ -2699,7 +3045,7 @@ def upload_support_document():
     
 @app.route("/check-rfp-support-documents", methods=["GET", "OPTIONS"])
 def check_rfp_support_documents():
-    """Check if an RFP has support documents"""
+    """Check if an RFP has support documents (NEW ORG-BASED STRUCTURE)"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -2707,15 +3053,26 @@ def check_rfp_support_documents():
         return jsonify({"error": "Firebase is not available"}), 503
         
     try:
+        org_id = request.args.get("orgId")  # NEW: Required parameter
         rfp_id = request.args.get("rfpId")
+        
         
         if not rfp_id:
             return jsonify({"error": "rfpId is required"}), 400
+            
+        if not org_id:
+            return jsonify({"error": "orgId is required"}), 400
         
-        # Check if RFP support documents exist
-        rfp_files_ref = db.collection("rfp_support_embeddings").document(f"rfp-{rfp_id}").collection("files")
+        print(f"🔍 Checking RFP support documents for Org: {org_id}, RFP: {rfp_id}")
+        
+        # NEW STRUCTURE: Check if RFP support documents exist
+        rfp_files_ref = (db.collection("org_rfp_support_embeddings")
+                        .document(f"org-{org_id}")
+                        .collection("rfps")
+                        .document(f"rfp-{rfp_id}")
+                        .collection("files"))
+        
         files = list(rfp_files_ref.limit(1).stream())
-        
         has_support_documents = len(files) > 0
         
         if has_support_documents:
@@ -2730,25 +3087,29 @@ def check_rfp_support_documents():
                     "filename": file_data.get("filename"),
                     "file_type": file_data.get("file_type"),
                     "created_at": file_data.get("created_at"),
-                    "chunk_count": file_data.get("chunk_count", 0)
+                    "chunk_count": file_data.get("chunk_count", 0),
+                    "processing_version": file_data.get("processing_version", "legacy")
                 })
         else:
             file_list = []
         
         return jsonify({
             "rfp_id": rfp_id,
+            "org_id": org_id,
             "has_support_documents": has_support_documents,
             "document_count": len(file_list),
-            "files": file_list
+            "files": file_list,
+            "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files"
         }), 200
         
     except Exception as e:
         error_msg = str(e)
         print(f"❌ Check RFP Support Documents Error: {error_msg}")
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
+    
 @app.route("/chat-rfp", methods=["POST", "OPTIONS"])
 def chat_with_rfp_documents():
-    """Chat with RFP-specific support documents"""
+    """Chat with RFP-specific support documents (NEW ORG-BASED STRUCTURE)"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -2768,19 +3129,24 @@ def chat_with_rfp_documents():
 
         query = data.get("query")
         rfp_id = data.get("rfpId")
+        org_id = data.get("orgId")  # NEW: Required parameter
         
-        if not query or not rfp_id:
-            return jsonify({"error": "Query and rfpId are required."}), 400
+        if not query or not rfp_id or not org_id:
+            return jsonify({"error": "Query, rfpId, and orgId are required."}), 400
 
-        print(f"🤖 Processing RFP chat query: '{query}' for RFP: {rfp_id}")
+        print(f"🤖 Processing RFP chat query: '{query}' for Org: {org_id}, RFP: {rfp_id}")
 
         # Get query embedding
         query_embedding = np.array(embed_query(query))
 
-        # Get RFP support documents
-        rfp_files_ref = db.collection("rfp_support_embeddings").document(f"rfp-{rfp_id}").collection("files")
-        files = rfp_files_ref.stream()
+        # NEW STRUCTURE: Get RFP support documents
+        rfp_files_ref = (db.collection("org_rfp_support_embeddings")
+                        .document(f"org-{org_id}")
+                        .collection("rfps")
+                        .document(f"rfp-{rfp_id}")
+                        .collection("files"))
         
+        files = rfp_files_ref.stream()
         retrieved_docs = []
         
         # Process each file
@@ -2810,7 +3176,8 @@ def chat_with_rfp_documents():
                         "filename": file_data.get("filename", "Unknown"),
                         "file_id": file_data.get("file_id", file_doc.id),
                         "file_type": file_data.get("file_type", "unknown"),
-                        "document_type": "support"
+                        "document_type": "support",
+                        "processing_version": file_data.get("processing_version", "legacy")
                     })
 
         # Get top chunks by similarity
@@ -2820,10 +3187,12 @@ def chat_with_rfp_documents():
             return jsonify({
                 "query": query, 
                 "rfp_id": rfp_id,
+                "org_id": org_id,
                 "retrieved_chunks": [], 
                 "answer": "No relevant information found in the RFP support documents.",
                 "source_files": [],
-                "chat_type": "rfp_support"
+                "chat_type": "rfp_support",
+                "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files"
             }), 200
 
         # Generate answer
@@ -2840,18 +3209,21 @@ def chat_with_rfp_documents():
                     "filename": doc["filename"],
                     "file_type": doc["file_type"],
                     "file_id": doc["file_id"],
-                    "document_type": doc["document_type"]
+                    "document_type": doc["document_type"],
+                    "processing_version": doc["processing_version"]
                 })
                 seen_files.add(file_key)
 
         return jsonify({
             "query": query, 
             "rfp_id": rfp_id,
+            "org_id": org_id,
             "retrieved_chunks": context_chunks, 
             "answer": answer,
             "source_files": source_files,
             "relevance_scores": [doc["score"] for doc in top_chunks],
-            "chat_type": "rfp_support"
+            "chat_type": "rfp_support",
+            "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files"
         }), 200
 
     except Exception as e:
@@ -2859,9 +3231,10 @@ def chat_with_rfp_documents():
         print(f"❌ RFP Chat Error: {error_msg}")
         traceback.print_exc()
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
+    
 @app.route("/delete-rfp-support-document", methods=["DELETE", "OPTIONS"])
 def delete_rfp_support_document():
-    """Delete a specific RFP support document"""
+    """Delete a specific RFP support document (NEW ORG-BASED STRUCTURE)"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -2871,13 +3244,21 @@ def delete_rfp_support_document():
     try:
         rfp_id = request.args.get("rfpId")
         file_id = request.args.get("fileId")
+        org_id = request.args.get("orgId")  # NEW: Required parameter
 
-        if not rfp_id or not file_id:
-            return jsonify({"error": "rfpId and fileId are required"}), 400
+        if not rfp_id or not file_id or not org_id:
+            return jsonify({"error": "rfpId, fileId, and orgId are required"}), 400
 
-        print(f"🗑️ Deleting RFP support document - RFP: {rfp_id}, fileId: {file_id}")
+        print(f"🗑️ Deleting RFP support document - Org: {org_id}, RFP: {rfp_id}, fileId: {file_id}")
 
-        rfp_file_ref = db.collection("rfp_support_embeddings").document(f"rfp-{rfp_id}").collection("files").document(file_id)
+        # NEW STRUCTURE: Access document using org-based path
+        rfp_file_ref = (db.collection("org_rfp_support_embeddings")
+                       .document(f"org-{org_id}")
+                       .collection("rfps")
+                       .document(f"rfp-{rfp_id}")
+                       .collection("files")
+                       .document(file_id))
+        
         file_doc = rfp_file_ref.get()
         
         if file_doc.exists:
@@ -2892,27 +3273,30 @@ def delete_rfp_support_document():
             print(f"✅ Successfully deleted RFP support document and {chunks_deleted} chunks")
             
             # Update backend status
-            update_backend_embedding_status(file_id, file_data.get("org_id"), False)
+            update_backend_embedding_status(file_id, org_id, False)
             
             return jsonify({
                 "message": "Successfully deleted RFP support document",
                 "rfp_id": rfp_id,
+                "org_id": org_id,
                 "file_id": file_id,
                 "filename": file_data.get("filename", "unknown"),
-                "chunks_deleted": chunks_deleted
+                "chunks_deleted": chunks_deleted,
+                "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files/{file_id}"
             }), 200
         else:
             return jsonify({
                 "message": "RFP support document not found",
                 "rfp_id": rfp_id,
-                "file_id": file_id
+                "org_id": org_id,
+                "file_id": file_id,
+                "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files/{file_id}"
             }), 404
 
     except Exception as e:
         error_msg = str(e)
         print(f"❌ Delete RFP Support Document Error: {error_msg}")
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
-    
 # Add this new endpoint to your Python Flask application
 
 @app.route("/run-question-agent", methods=["POST", "OPTIONS"])
@@ -3819,7 +4203,7 @@ def run_proposal_narrative_agent():
                                 embeddings = embed_chunks(chunks, upload_id=support_upload_id, org_id=org_id, filename=filename)
                                 
                                 # Store in RFP-specific Firestore collection
-                                rfp_doc_ref = db.collection("rfp_support_embeddings").document(f"rfp-{rfp_id}").collection("files").document(support_upload_id)
+                                rfp_doc_ref = db.collection("org_rfp_support_embeddings").document(f"rfp-{rfp_id}").collection("files").document(support_upload_id)
                                 
                                 # Store file metadata
                                 rfp_doc_ref.set({
