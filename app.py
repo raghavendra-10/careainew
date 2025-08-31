@@ -2184,6 +2184,100 @@ def delete_file_by_file_id():
             "details": error_msg
         }), 500
 
+@app.route("/api/v2/bulk-delete", methods=["DELETE", "OPTIONS"])
+def bulk_delete_files_v2():
+    """Bulk delete files and their embeddings/chunks - V2 API"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    try:
+        data = request.get_json(silent=True) or {}
+        org_id = data.get("orgId")
+        file_ids = data.get("fileIds", [])
+        
+        if not org_id:
+            return jsonify({"error": "orgId is required"}), 400
+            
+        if not file_ids or not isinstance(file_ids, list):
+            return jsonify({"error": "fileIds array is required"}), 400
+            
+        if len(file_ids) > 50:
+            return jsonify({"error": "Cannot delete more than 50 files at once"}), 400
+
+        print(f"🗑️ Bulk deleting embeddings for {len(file_ids)} files in org: {org_id}")
+
+        files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+        
+        deletion_results = []
+        total_chunks_deleted = 0
+        successful_deletions = 0
+
+        # Process each file
+        for file_id in file_ids:
+            try:
+                file_doc_ref = files_ref.document(file_id)
+                file_doc = file_doc_ref.get()
+                
+                if file_doc.exists:
+                    file_data = file_doc.to_dict()
+                    
+                    # Delete all chunks in the file
+                    chunks_deleted = delete_collection(file_doc_ref.collection("chunks"), 100)
+                    
+                    # Delete the file document
+                    file_doc_ref.delete()
+                    
+                    total_chunks_deleted += chunks_deleted
+                    successful_deletions += 1
+                    
+                    deletion_results.append({
+                        "fileId": file_id,
+                        "filename": file_data.get("filename", "unknown"),
+                        "chunks_deleted": chunks_deleted,
+                        "success": True
+                    })
+                    
+                    print(f"✅ Deleted file {file_id} and {chunks_deleted} chunks")
+                    
+                else:
+                    deletion_results.append({
+                        "fileId": file_id,
+                        "success": False,
+                        "error": "File not found in embedding database"
+                    })
+                    print(f"⚠️ File {file_id} not found in embeddings")
+                    
+            except Exception as e:
+                deletion_results.append({
+                    "fileId": file_id,
+                    "success": False,
+                    "error": str(e)
+                })
+                print(f"❌ Error deleting {file_id}: {str(e)}")
+
+        return jsonify({
+            "success": True,
+            "message": f"Bulk deletion completed: {successful_deletions}/{len(file_ids)} files deleted",
+            "data": {
+                "total_files_processed": len(file_ids),
+                "successful_deletions": successful_deletions,
+                "total_chunks_deleted": total_chunks_deleted,
+                "deletion_results": deletion_results
+            }
+        }), 200
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Bulk deletion error: {error_msg}")
+        traceback.print_exc()
+        return jsonify({
+            "error": "Internal server error", 
+            "details": error_msg
+        }), 500
+
 # @app.route("/cleanup-orphaned", methods=["POST", "OPTIONS"])
 # def cleanup_orphaned_embeddings():
 #     """Clean up orphaned embeddings using fileIds from database"""
@@ -4974,7 +5068,7 @@ def get_file_status_v2():
         return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8001))
+    port = int(os.environ.get("PORT", 8002))
     debug_mode = os.environ.get("DEBUG", "0") == "1"
     
     print(f"🚀 CareAI API v2.3.0 - Enhanced with Multimodal Question Extraction")
