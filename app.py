@@ -550,6 +550,292 @@ def extract_text_with_encoding_detection(file_path):
     except Exception as e:
         return f"Text extraction error: {str(e)}"
 
+def extract_text_with_ai_direct(file_path, filename):
+    """Extract text content directly from any file using Vertex AI multimodal capabilities"""
+    if not VERTEX_AVAILABLE:
+        print("❌ Vertex AI not available, falling back to traditional extraction")
+        return None
+        
+    try:
+        # Verify file exists and is readable
+        if not os.path.exists(file_path):
+            print(f"❌ File does not exist: {file_path}")
+            return None
+        
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            print(f"❌ File is empty: {file_path}")
+            return None
+            
+        print(f"🤖 AI-based text extraction for: {filename} ({file_size} bytes)")
+        
+        # Get file extension
+        file_ext = filename.split(".")[-1].lower() if "." in filename else "unknown"
+        
+        # Customize prompt based on file type
+        if file_ext in ["png", "jpg", "jpeg", "gif", "webp"]:
+            prompt = f"""
+Extract ALL visible text and content from this image. Include:
+- All text visible in the image (OCR)
+- Descriptions of charts, diagrams, or visual elements
+- Any data, numbers, or structured information shown
+- Context and meaning of visual elements
+
+Please provide a comprehensive text representation of everything in this image that could be useful for document analysis and search.
+
+Return the extracted content as plain text without any formatting or special characters.
+"""
+        else:
+            prompt = f"""
+Extract ALL text content from this document. Include:
+- All paragraphs, headings, and body text
+- Tables, lists, and structured data
+- Any metadata or document information
+- Numbers, dates, and specific details
+- Do not add your own interpretation, just extract the actual content
+
+Please provide a comprehensive text extraction of the entire document content.
+
+Return the extracted content as plain text without any formatting or special characters.
+"""
+
+        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+        model = GenerativeModel("gemini-2.0-flash")
+        
+        # Prepare the content
+        parts = [Part.from_text(prompt)]
+        
+        # MIME type mapping
+        mime_mapping = {
+            # Documents
+            "pdf": "application/pdf",
+            "doc": "application/msword",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "odt": "application/vnd.oasis.opendocument.text",
+            "rtf": "application/rtf",
+            
+            # Spreadsheets
+            "xls": "application/vnd.ms-excel",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "ods": "application/vnd.oasis.opendocument.spreadsheet",
+            "numbers": "application/vnd.apple.numbers",
+            
+            # Presentations
+            "ppt": "application/vnd.ms-powerpoint",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "odp": "application/vnd.oasis.opendocument.presentation",
+            "key": "application/vnd.apple.keynote",
+            
+            # Text formats
+            "txt": "text/plain",
+            "md": "text/markdown",
+            "markdown": "text/markdown", 
+            "csv": "text/csv",
+            "tsv": "text/tab-separated-values",
+            "xml": "application/xml",
+            "html": "text/html",
+            "htm": "text/html",
+            "json": "application/json",
+            "yaml": "application/x-yaml",
+            "yml": "application/x-yaml",
+            
+            # Code files
+            "py": "text/x-python",
+            "js": "application/javascript",
+            "ts": "application/typescript",
+            "jsx": "text/jsx",
+            "tsx": "text/tsx",
+            "java": "text/x-java-source",
+            "cpp": "text/x-c++src",
+            "c": "text/x-csrc",
+            "cs": "text/x-csharp",
+            "php": "application/x-php",
+            "rb": "text/x-ruby",
+            "go": "text/x-go",
+            "rs": "text/x-rust",
+            "swift": "text/x-swift",
+            "kt": "text/x-kotlin",
+            "scala": "text/x-scala",
+            "sql": "application/sql",
+            "sh": "application/x-sh",
+            "ps1": "text/x-powershell",
+            
+            # Images
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "bmp": "image/bmp",
+            "tiff": "image/tiff",
+            "tif": "image/tiff",
+            "svg": "image/svg+xml",
+            "ico": "image/x-icon",
+            "heic": "image/heic",
+            "heif": "image/heif",
+            
+            # Audio
+            "mp3": "audio/mpeg",
+            "wav": "audio/wav",
+            "m4a": "audio/m4a",
+            "aac": "audio/aac",
+            "ogg": "audio/ogg",
+            "flac": "audio/flac",
+            
+            # Video  
+            "mp4": "video/mp4",
+            "mov": "video/quicktime",
+            "avi": "video/x-msvideo",
+            "wmv": "video/x-ms-wmv",
+            "flv": "video/x-flv",
+            "webm": "video/webm",
+            "mkv": "video/x-matroska",
+            "m4v": "video/x-m4v",
+            
+            # Archives
+            "zip": "application/zip",
+            "rar": "application/vnd.rar",
+            "7z": "application/x-7z-compressed",
+            "tar": "application/x-tar",
+            "gz": "application/gzip",
+            "bz2": "application/x-bzip2",
+            "xz": "application/x-xz",
+            
+            # eBooks
+            "epub": "application/epub+zip",
+            "mobi": "application/x-mobipocket-ebook",
+            "azw": "application/vnd.amazon.ebook",
+            "azw3": "application/vnd.amazon.ebook",
+            
+            # CAD/Design
+            "dwg": "application/acad",
+            "dxf": "application/dxf",
+            "ai": "application/postscript",
+            "psd": "application/vnd.adobe.photoshop",
+            "sketch": "application/sketch",
+            
+            # Other common formats
+            "log": "text/plain",
+            "cfg": "text/plain",
+            "conf": "text/plain",
+            "ini": "text/plain",
+            "properties": "text/plain",
+            "env": "text/plain",
+            "lock": "text/plain",
+            "gitignore": "text/plain",
+            "dockerfile": "text/plain",
+        }
+        
+        # Files that Gemini can handle directly
+        gemini_supported_files = [
+            # Documents
+            "pdf", "txt", "csv", "json", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
+            
+            # Images  
+            "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
+            
+            # Code files (text-based)
+            "py", "js", "ts", "jsx", "tsx", "java", "cpp", "c", "cs", "php", "rb", "go", "rs", 
+            "swift", "kt", "scala", "sql", "sh", "ps1",
+            
+            # Configuration files
+            "log", "cfg", "conf", "ini", "properties", "env", "lock", "gitignore", "dockerfile",
+            
+            # Audio (Gemini 2.0 supports audio)
+            "mp3", "wav", "m4a", "aac", "ogg", "flac",
+            
+            # Video (Gemini 2.0 supports video)
+            "mp4", "mov", "avi", "wmv", "webm", "mkv", "m4v"
+        ]
+        
+        if file_ext in gemini_supported_files:
+            try:
+                # Read file as bytes for direct upload
+                with open(file_path, "rb") as f:
+                    file_data = f.read()
+                
+                mime_type = mime_mapping.get(file_ext, "application/octet-stream")
+                
+                # Check file size (Gemini has limits)
+                max_size = 20 * 1024 * 1024  # 20MB limit for safety
+                if len(file_data) > max_size:
+                    print(f"⚠️ File too large for AI extraction ({len(file_data)} bytes), falling back")
+                    return None
+                
+                # Add file part directly
+                file_part = Part.from_data(data=file_data, mime_type=mime_type)
+                parts.append(file_part)
+                
+                print(f"✅ Using AI multimodal extraction for {filename} ({mime_type}, {len(file_data)} bytes)")
+                
+            except Exception as e:
+                print(f"⚠️ Direct AI upload failed for {filename}: {e}")
+                return None
+        else:
+            # For unsupported file types, try to read as text and let AI process it
+            try:
+                print(f"📄 Attempting text read for unsupported type: {file_ext}")
+                content = extract_text_with_encoding_detection(file_path)
+                if content and len(content.strip()) > 0:
+                    # Limit content length for AI processing
+                    if len(content) > 50000:  # 50k char limit
+                        content = content[:50000] + "...[truncated]"
+                    parts.append(Part.from_text(f"\nDocument Content to extract from:\n{content}"))
+                else:
+                    print(f"❌ No text content found in {filename}")
+                    return None
+            except Exception as e:
+                print(f"❌ Failed to read file as text: {e}")
+                return None
+        
+        # Generate response with AI
+        print(f"🤖 Sending to AI for text extraction...")
+        
+        try:
+            response = model.generate_content(
+                parts,
+                generation_config={
+                    "max_output_tokens": 8192,
+                    "temperature": 0.1,  # Low temperature for accurate extraction
+                    "top_p": 0.95,
+                },
+                safety_settings=[
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                ],
+                request_options={"timeout": 300}
+            )
+            
+            if response and response.text:
+                extracted_text = response.text.strip()
+                print(f"✅ AI extracted {len(extracted_text)} characters from {filename}")
+                return extracted_text
+            else:
+                print(f"❌ Empty response from AI for {filename}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ AI generation failed for {filename}: {str(e)}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ AI text extraction error for {filename}: {str(e)}")
+        return None
+
 def extract_text_from_file(file_path, file_type):
     """Enhanced text extraction supporting many file types - MAIN FUNCTION"""
     try:
@@ -832,17 +1118,26 @@ def embed_query(query):
         raise
 
 def parse_and_chunk(file_path, file_ext, chunk_size=50, max_chunks=1000):
-    """Parse file content into chunks"""
+    """Parse file content into chunks using AI-first extraction"""
     try:
-        text = extract_text_from_file(file_path, file_ext)
+        # Extract filename from path for AI processing
+        filename = os.path.basename(file_path)
+        
+        # Try AI-based extraction first
+        text = extract_text_with_ai_direct(file_path, filename)
+        
+        # If AI extraction fails or returns None, fall back to traditional extraction
+        if not text or text.strip() == "":
+            print(f"🔄 AI extraction failed, falling back to traditional extraction for {filename}")
+            text = extract_text_from_file(file_path, file_ext)
         
         if not text or text.strip() == "":
-            print(f"Warning: No text extracted from {file_path}")
+            print(f"❌ No text extracted from {file_path} using any method")
             return []
         
-        # Check for extraction errors
+        # Check for extraction errors from traditional method
         if text.startswith("ERROR:"):
-            print(f"Extraction error: {text}")
+            print(f"❌ Extraction error: {text}")
             return []
             
         words = text.split()
@@ -1028,7 +1323,26 @@ IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
         }
         
         # Files that Gemini can handle directly (Excel and Word files are NOT included)
-        gemini_supported_files = ["pdf", "txt", "csv", "json", "png", "jpg", "jpeg", "gif", "webp"]
+        gemini_supported_files = [
+            # Documents
+            "pdf", "txt", "csv", "json", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
+            
+            # Images  
+            "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
+            
+            # Code files (text-based)
+            "py", "js", "ts", "jsx", "tsx", "java", "cpp", "c", "cs", "php", "rb", "go", "rs", 
+            "swift", "kt", "scala", "sql", "sh", "ps1",
+            
+            # Configuration files
+            "log", "cfg", "conf", "ini", "properties", "env", "lock", "gitignore", "dockerfile",
+            
+            # Audio (Gemini 2.0 supports audio)
+            "mp3", "wav", "m4a", "aac", "ogg", "flac",
+            
+            # Video (Gemini 2.0 supports video)
+            "mp4", "mov", "avi", "wmv", "webm", "mkv", "m4v"
+        ]
         
         if file_ext in gemini_supported_files:
             try:
@@ -4657,7 +4971,26 @@ IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
         }
         
         # Files that Gemini can handle directly
-        gemini_supported_files = ["pdf", "txt", "csv", "json", "png", "jpg", "jpeg", "gif", "webp"]
+        gemini_supported_files = [
+            # Documents
+            "pdf", "txt", "csv", "json", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
+            
+            # Images  
+            "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
+            
+            # Code files (text-based)
+            "py", "js", "ts", "jsx", "tsx", "java", "cpp", "c", "cs", "php", "rb", "go", "rs", 
+            "swift", "kt", "scala", "sql", "sh", "ps1",
+            
+            # Configuration files
+            "log", "cfg", "conf", "ini", "properties", "env", "lock", "gitignore", "dockerfile",
+            
+            # Audio (Gemini 2.0 supports audio)
+            "mp3", "wav", "m4a", "aac", "ogg", "flac",
+            
+            # Video (Gemini 2.0 supports video)
+            "mp4", "mov", "avi", "wmv", "webm", "mkv", "m4v"
+        ]
         
         if file_ext in gemini_supported_files:
             try:
@@ -4880,17 +5213,8 @@ def upload_file_v2():
         filename = file.filename
         file_ext = filename.split(".")[-1].lower()
 
-        # Check supported file types
-        supported, missing = check_file_processing_dependencies()
-        all_supported = supported["always"] + supported["conditional"] + ["png", "jpg", "jpeg", "gif", "webp"]
-        
-        if file_ext not in all_supported:
-            # Notify Node.js backend of failure
-            notify_backend_status(file_id, user_id, 'failed', False, f"Unsupported file type: {file_ext}")
-            return jsonify({
-                "error": f"Unsupported file type: {file_ext}",
-                "supported_types": sorted(all_supported)
-            }), 400
+        # Accept all file types - AI will handle extraction
+        print(f"📋 V2 Processing file type: {file_ext} (all types accepted with AI extraction)")
 
         # Notify Node.js backend: processing started
         notify_backend_status(file_id, user_id, 'processing', False)
