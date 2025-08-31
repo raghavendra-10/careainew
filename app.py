@@ -2811,6 +2811,108 @@ def chat_with_doc():
         print(f"❌ Universal Chat Error: {error_msg}")
         traceback.print_exc()
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+@app.route("/chat-ragie", methods=["POST", "OPTIONS"])
+def chat_with_ragie():
+    """Chat endpoint using Ragie API for retrieval and local GPT for response generation"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "AI generation service is not available"}), 503
+        
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        query = data.get("query")
+        org_id = data.get("orgId")
+        top_k = data.get("top_k", 10)
+        rerank = data.get("rerank", False)
+        
+        if not query or not org_id:
+            return jsonify({"error": "Query and orgId are required."}), 400
+
+        print(f"🔍 Processing Ragie chat query: '{query}' for org: {org_id}")
+
+        # Step 1: Call Ragie API for retrieval
+        ragie_url = "https://api.ragie.ai/retrievals"
+        ragie_payload = {
+            "rerank": rerank,
+            "query": query,
+            "top_k": top_k
+        }
+        ragie_headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "authorization": "Bearer tnt_7kuuKbBhbh4_RxOTauUTuIhEADMwd5w6BitGJbK41uSucAARlFqgeJi"
+        }
+
+        print("📡 Calling Ragie API for document retrieval...")
+        ragie_response = requests.post(ragie_url, json=ragie_payload, headers=ragie_headers, timeout=30)
+        
+        if ragie_response.status_code != 200:
+            print(f"❌ Ragie API error: {ragie_response.status_code} - {ragie_response.text}")
+            return jsonify({"error": f"Ragie API error: {ragie_response.status_code}"}), 500
+
+        ragie_data = ragie_response.json()
+        scored_chunks = ragie_data.get("scored_chunks", [])
+        
+        print(f"✅ Ragie API returned {len(scored_chunks)} chunks")
+
+        # Step 2: Prepare context for GPT generation using only Ragie results
+        context_chunks = []
+        
+        # Add Ragie chunks to context
+        for chunk in scored_chunks:
+            context_chunks.append(f"[{chunk.get('document_name', 'Unknown')} (Score: {chunk.get('score', 0):.3f})]\n{chunk.get('text', '')}")
+
+        if not context_chunks:
+            return jsonify({
+                "response": "I couldn't find relevant information to answer your query.",
+                "query": query,
+                "sources": {
+                    "ragie_chunks": 0
+                },
+                "api_version": "1.0.0"
+            }), 200
+
+        print(f"🎯 Generating response with {len(context_chunks)} context chunks from Ragie")
+
+        # Step 3: Generate response using local GPT/Vertex AI
+        ai_response = generate_answer_with_gcp(query, context_chunks)
+
+        # Step 4: Prepare response
+        response_data = {
+            "response": ai_response,
+            "query": query,
+            "sources": {
+                "ragie_chunks": len(scored_chunks),
+                "total_context_chunks": len(context_chunks)
+            },
+            "ragie_documents": [
+                {
+                    "text": chunk.get("text", "")[:200] + "...",
+                    "score": chunk.get("score", 0),
+                    "document_name": chunk.get("document_name", "Unknown"),
+                    "document_id": chunk.get("document_id", "")
+                } for chunk in scored_chunks[:5]  # Show top 5
+            ],
+            "api_version": "1.0.0"
+        }
+
+        print(f"✅ Chat response generated successfully")
+        return jsonify(response_data), 200
+
+    except requests.RequestException as req_error:
+        print(f"❌ Request error: {str(req_error)}")
+        return jsonify({"error": "External API request failed", "details": str(req_error)}), 500
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Chat Ragie Error: {error_msg}")
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
     
 # ================================
 # RFP SUPPORT DOCUMENT ENDPOINTS
@@ -4649,9 +4751,230 @@ def post_proposal_agent_results_to_backend(rfp_id, agent_results, auth_token):
 
     except Exception as e:
         print(f"❌ Error posting proposal agent results: {str(e)}")
-    
+
+# ================================
+# V2 API ROUTES FOR MVP
+# ================================
+
+@app.route("/api/v2/upload", methods=["POST", "OPTIONS"])
+def upload_file_v2():
+    """V2 Upload endpoint for MVP with WebSocket status updates"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    if not OPENAI_AVAILABLE:
+        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+        
+    save_path = None
+    try:
+        org_id = request.args.get("orgId")
+        file_id = request.args.get("fileId")
+        user_id = request.args.get("userId")
+        
+        print(f"📥 V2 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}")
+        
+        if not org_id or not file_id or not user_id:
+            return jsonify({"error": "orgId, fileId, and userId are required"}), 400
+
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+
+        file = request.files["file"]
+        filename = file.filename
+        file_ext = filename.split(".")[-1].lower()
+
+        # Check supported file types
+        supported, missing = check_file_processing_dependencies()
+        all_supported = supported["always"] + supported["conditional"] + ["png", "jpg", "jpeg", "gif", "webp"]
+        
+        if file_ext not in all_supported:
+            # Notify Node.js backend of failure
+            notify_backend_status(file_id, user_id, 'failed', False, f"Unsupported file type: {file_ext}")
+            return jsonify({
+                "error": f"Unsupported file type: {file_ext}",
+                "supported_types": sorted(all_supported)
+            }), 400
+
+        # Notify Node.js backend: processing started
+        notify_backend_status(file_id, user_id, 'processing', False)
+        
+        # Save file temporarily
+        save_path = os.path.join(UPLOAD_FOLDER, f"{file_id}_{filename}")
+        file.save(save_path)
+        print(f"✅ V2 File saved: {save_path}")
+        
+        # Process file in background thread
+        def process_file_v2_async():
+            try:
+                print(f"🔄 V2 Processing file: {filename}")
+                
+                # Extract text and create chunks
+                chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+                
+                if not chunks:
+                    print(f"❌ V2 No content extracted from {filename}")
+                    notify_backend_status(file_id, user_id, 'failed', False, "No content extracted")
+                    return
+                
+                # Notify: embedding phase started
+                notify_backend_status(file_id, user_id, 'embedding', False)
+                    
+                # Generate embeddings
+                print(f"🧠 V2 Generating embeddings for {len(chunks)} chunks")
+                embeddings = embed_chunks(chunks, upload_id=file_id, org_id=org_id, filename=filename)
+                
+                if not embeddings:
+                    print(f"❌ V2 Embedding generation failed for {filename}")
+                    notify_backend_status(file_id, user_id, 'failed', False, "Embedding generation failed")
+                    return
+                
+                # Store in Firestore
+                file_doc_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files").document(file_id)
+                
+                file_doc_ref.set({
+                    "filename": filename,
+                    "file_id": file_id,
+                    "file_type": file_ext,
+                    "chunk_count": len(chunks),
+                    "upload_timestamp": time.time(),
+                    "created_at": datetime.now().isoformat(),
+                    "org_id": org_id,
+                    "user_id": user_id,
+                    "status": "completed"
+                })
+                
+                # Store embeddings in subcollection
+                chunks_collection = file_doc_ref.collection("chunks")
+                for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
+                    chunks_collection.document(f"chunk_{i}").set({
+                        "text": chunk_text,
+                        "embedding": embedding,
+                        "chunk_index": i,
+                        "created_at": datetime.now().isoformat()
+                    })
+                
+                print(f"✅ V2 Embeddings stored successfully for {filename}")
+                
+                # Notify Node.js backend: completed
+                notify_backend_status(file_id, user_id, 'completed', True)
+                
+            except Exception as e:
+                print(f"❌ V2 Processing error for {filename}: {str(e)}")
+                traceback.print_exc()
+                notify_backend_status(file_id, user_id, 'failed', False, str(e))
+            finally:
+                # Clean up temporary file
+                if save_path and os.path.exists(save_path):
+                    os.remove(save_path)
+                    print(f"🗑️ V2 Cleaned up: {save_path}")
+        
+        # Start processing in background
+        processing_thread = Thread(target=process_file_v2_async, daemon=True)
+        processing_thread.start()
+        
+        return jsonify({
+            "success": True,
+            "message": "File received and processing started",
+            "fileId": file_id,
+            "filename": filename,
+            "status": "processing"
+        }), 202
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ V2 Upload error: {error_msg}")
+        traceback.print_exc()
+        
+        # Notify backend of failure
+        if 'file_id' in locals() and 'user_id' in locals():
+            notify_backend_status(file_id, user_id, 'failed', False, error_msg)
+        
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+    finally:
+        # Clean up on immediate error
+        if save_path and os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+            except:
+                pass
+
+def notify_backend_status(file_id, user_id, status, embedding_complete, error=None):
+    """Notify Node.js backend of file processing status via webhook"""
+    try:
+        backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8080")
+        webhook_url = f"{backend_api_url}/api/v2/files/webhook/ai-status"
+        
+        payload = {
+            "fileId": file_id,
+            "userId": user_id,
+            "status": status,
+            "embeddingComplete": embedding_complete,
+            "timestamp": datetime.now().isoformat(),
+            "source": "flask_ai_v2"
+        }
+        
+        if error:
+            payload["error"] = error
+            
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ V2 Status webhook sent: {file_id} → {status}")
+        else:
+            print(f"⚠️ V2 Webhook failed: {response.status_code}")
+            
+    except Exception as e:
+        print(f"❌ V2 Webhook error: {str(e)}")
+
+@app.route("/api/v2/status", methods=["GET", "OPTIONS"])
+def get_file_status_v2():
+    """V2 Get file processing status"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    try:
+        file_id = request.args.get("fileId")
+        org_id = request.args.get("orgId")
+        
+        if not file_id or not org_id:
+            return jsonify({"error": "fileId and orgId are required"}), 400
+            
+        # Check if file exists in Firestore
+        file_doc_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files").document(file_id)
+        file_doc = file_doc_ref.get()
+        
+        if file_doc.exists:
+            data = file_doc.to_dict()
+            return jsonify({
+                "success": True,
+                "fileId": file_id,
+                "status": data.get("status", "unknown"),
+                "filename": data.get("filename"),
+                "chunkCount": data.get("chunk_count", 0),
+                "embeddingComplete": data.get("status") == "completed",
+                "createdAt": data.get("created_at")
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "File not found in embedding database",
+                "fileId": file_id
+            }), 404
+            
+    except Exception as e:
+        print(f"❌ V2 Status check error: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8001))
     debug_mode = os.environ.get("DEBUG", "0") == "1"
     
     print(f"🚀 CareAI API v2.3.0 - Enhanced with Multimodal Question Extraction")
