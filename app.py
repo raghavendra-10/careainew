@@ -39,8 +39,8 @@ CORS(app, origins="*", methods=["GET", "POST", "DELETE", "OPTIONS", "PUT"],
 upload_progress = {}
 progress_lock = Lock()
 
-# Create uploads folder
-UPLOAD_FOLDER = "uploads"
+# Create uploads folder with absolute path
+UPLOAD_FOLDER = os.path.abspath("uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ================================
@@ -558,6 +558,10 @@ def extract_text_with_ai_direct(file_path, filename):
         
     try:
         # Verify file exists and is readable
+        print(f"🔍 AI extraction - file_path: {file_path}")
+        print(f"🔍 AI extraction - absolute path: {os.path.abspath(file_path)}")
+        print(f"🔍 AI extraction - current working directory: {os.getcwd()}")
+        
         if not os.path.exists(file_path):
             print(f"❌ File does not exist: {file_path}")
             return None
@@ -816,8 +820,7 @@ Return the extracted content as plain text without any formatting or special cha
                         category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
                         threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
                     ),
-                ],
-                request_options={"timeout": 300}
+                ]
             )
             
             if response and response.text:
@@ -1124,11 +1127,14 @@ def parse_and_chunk(file_path, file_ext, chunk_size=50, max_chunks=1000):
         filename = os.path.basename(file_path)
         
         # Try AI-based extraction first
+        print(f"🔍 About to call AI extraction: {file_path} exists={os.path.exists(file_path)}")
         text = extract_text_with_ai_direct(file_path, filename)
+        print(f"🔍 After AI extraction call: {file_path} exists={os.path.exists(file_path)}")
         
         # If AI extraction fails or returns None, fall back to traditional extraction
         if not text or text.strip() == "":
             print(f"🔄 AI extraction failed, falling back to traditional extraction for {filename}")
+            print(f"🔍 Checking file existence: {file_path} -> {os.path.exists(file_path)}")
             text = extract_text_from_file(file_path, file_ext)
         
         if not text or text.strip() == "":
@@ -2076,7 +2082,7 @@ def upload_file():
         update_upload_progress(upload_id, "Processing", 0, "Starting enhanced upload", filename)
         
         # Save file temporarily
-        save_path = os.path.join(UPLOAD_FOLDER, f"{upload_id}_{filename}")
+        save_path = os.path.abspath(os.path.join(UPLOAD_FOLDER, f"{upload_id}_{filename}"))
         file.save(save_path)
         print(f"✅ File saved to {save_path}")
         
@@ -3378,7 +3384,7 @@ def upload_support_document():
         update_upload_progress(upload_id, "Processing", 0, "Starting RFP support document upload", filename)
         
         # Save file temporarily
-        save_path = os.path.join(UPLOAD_FOLDER, f"{upload_id}_{filename}")
+        save_path = os.path.abspath(os.path.join(UPLOAD_FOLDER, f"{upload_id}_{filename}"))
         file.save(save_path)
         print(f"✅ File saved to {save_path}")
         
@@ -3807,6 +3813,151 @@ def delete_rfp_support_document():
         error_msg = str(e)
         print(f"❌ Delete RFP Support Document Error: {error_msg}")
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+@app.route("/delete-project-data", methods=["DELETE", "OPTIONS"])
+def delete_project_data():
+    """Delete all project support documents and embeddings from Firestore"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    try:
+        project_id = request.args.get("projectId")
+        org_id = request.args.get("orgId")
+
+        if not project_id or not org_id:
+            return jsonify({"error": "projectId and orgId are required"}), 400
+
+        print(f"🗑️ Deleting project data - Org: {org_id}, Project: {project_id}")
+
+        # Access the project document in the org-based structure
+        project_ref = (db.collection("org_project_support_embeddings")
+                      .document(f"org-{org_id}")
+                      .collection("projects")
+                      .document(f"project-{project_id}"))
+        
+        project_doc = project_ref.get()
+        total_files_deleted = 0
+        total_chunks_deleted = 0
+        
+        if project_doc.exists:
+            project_data = project_doc.to_dict()
+            
+            # Delete all files and their chunks
+            files_collection = project_ref.collection("files")
+            files = files_collection.stream()
+            
+            for file_doc in files:
+                file_data = file_doc.to_dict()
+                file_id = file_doc.id
+                
+                print(f"🗑️ Deleting project file: {file_data.get('filename', 'unknown')} (ID: {file_id})")
+                
+                # Delete all chunks for this file
+                chunks_deleted = delete_collection(file_doc.reference.collection("chunks"), 100)
+                total_chunks_deleted += chunks_deleted
+                
+                # Delete the file document
+                file_doc.reference.delete()
+                total_files_deleted += 1
+            
+            # Delete the project document itself
+            project_ref.delete()
+            
+            print(f"✅ Successfully deleted project data: {total_files_deleted} files, {total_chunks_deleted} chunks")
+            
+            return jsonify({
+                "message": "Successfully deleted project data",
+                "project_id": project_id,
+                "org_id": org_id,
+                "files_deleted": total_files_deleted,
+                "chunks_deleted": total_chunks_deleted,
+                "storage_structure": f"org_project_support_embeddings/org-{org_id}/projects/project-{project_id}"
+            }), 200
+        else:
+            return jsonify({
+                "message": "Project data not found",
+                "project_id": project_id,
+                "org_id": org_id,
+                "files_deleted": 0,
+                "chunks_deleted": 0,
+                "storage_structure": f"org_project_support_embeddings/org-{org_id}/projects/project-{project_id}"
+            }), 404
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Delete Project Data Error: {error_msg}")
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+@app.route("/delete-project-support-document", methods=["DELETE", "OPTIONS"])
+def delete_project_support_document():
+    """Delete a specific project support document from Firestore"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    try:
+        project_id = request.args.get("projectId")
+        file_id = request.args.get("fileId")
+        org_id = request.args.get("orgId")
+
+        if not project_id or not file_id or not org_id:
+            return jsonify({"error": "projectId, fileId, and orgId are required"}), 400
+
+        print(f"🗑️ Deleting project support document - Org: {org_id}, Project: {project_id}, File: {file_id}")
+
+        # Access the file document in the project-based structure
+        project_file_ref = (db.collection("org_project_support_embeddings")
+                           .document(f"org-{org_id}")
+                           .collection("projects")
+                           .document(f"project-{project_id}")
+                           .collection("files")
+                           .document(file_id))
+        
+        file_doc = project_file_ref.get()
+        chunks_deleted = 0
+        
+        if file_doc.exists:
+            file_data = file_doc.to_dict()
+            
+            print(f"🗑️ Deleting project support file: {file_data.get('filename', 'unknown')} (ID: {file_id})")
+            
+            # Delete all chunks for this file
+            chunks_deleted = delete_collection(file_doc.reference.collection("chunks"), 100)
+            
+            # Delete the file document
+            file_doc.reference.delete()
+            
+            print(f"✅ Successfully deleted project support document and {chunks_deleted} chunks")
+            
+            return jsonify({
+                "message": "Successfully deleted project support document",
+                "project_id": project_id,
+                "org_id": org_id,
+                "file_id": file_id,
+                "filename": file_data.get("filename", "unknown"),
+                "chunks_deleted": chunks_deleted,
+                "storage_structure": f"org_project_support_embeddings/org-{org_id}/projects/project-{project_id}/files/{file_id}"
+            }), 200
+        else:
+            return jsonify({
+                "message": "Project support document not found",
+                "project_id": project_id,
+                "org_id": org_id,
+                "file_id": file_id,
+                "chunks_deleted": 0,
+                "storage_structure": f"org_project_support_embeddings/org-{org_id}/projects/project-{project_id}/files/{file_id}"
+            }), 404
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Delete Project Support Document Error: {error_msg}")
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
 # Add this new endpoint to your Python Flask application
 
 @app.route("/run-question-agent", methods=["POST", "OPTIONS"])
@@ -5211,6 +5362,15 @@ def upload_file_v2():
 
         file = request.files["file"]
         filename = file.filename
+        
+        # Fix double extension issue (e.g., "file.pdf.pdf" -> "file.pdf")
+        if filename.count('.') > 1:
+            parts = filename.split('.')
+            # Check if the last two parts are the same extension
+            if len(parts) >= 2 and parts[-1].lower() == parts[-2].lower():
+                filename = '.'.join(parts[:-1])  # Remove the duplicate extension
+                print(f"🔧 Fixed double extension: {file.filename} -> {filename}")
+        
         file_ext = filename.split(".")[-1].lower()
 
         # Accept all file types - AI will handle extraction
@@ -5219,18 +5379,44 @@ def upload_file_v2():
         # Notify Node.js backend: processing started
         notify_backend_status(file_id, user_id, 'processing', False)
         
-        # Save file temporarily
-        save_path = os.path.join(UPLOAD_FOLDER, f"{file_id}_{filename}")
+        # Save file temporarily - use absolute path to prevent working directory issues
+        save_path = os.path.abspath(os.path.join(UPLOAD_FOLDER, f"{file_id}_{filename}"))
         file.save(save_path)
         print(f"✅ V2 File saved: {save_path}")
+        
+        # Immediate verification that file was saved
+        if os.path.exists(save_path):
+            file_size = os.path.getsize(save_path)
+            print(f"✅ File confirmed saved: {save_path} ({file_size} bytes)")
+            
+            # Create a backup copy with different name to prevent Flask cleanup
+            backup_path = os.path.abspath(os.path.join(UPLOAD_FOLDER, f"backup_{file_id}_{filename}"))
+            import shutil
+            shutil.copy2(save_path, backup_path)
+            print(f"✅ Backup created: {backup_path}")
+            
+        else:
+            print(f"❌ WARNING: File not found immediately after save: {save_path}")
+            return jsonify({"error": "File save failed"}), 500
         
         # Process file in background thread
         def process_file_v2_async():
             try:
                 print(f"🔄 V2 Processing file: {filename}")
                 
+                # Use backup path for processing to avoid Flask interference
+                processing_path = backup_path
+                
+                # Verify file still exists before processing
+                if not os.path.exists(processing_path):
+                    print(f"❌ Backup file missing: {processing_path}")
+                    notify_backend_status(file_id, user_id, 'failed', False, "File not found")
+                    return
+                
+                print(f"✅ Using backup file for processing: {processing_path}")
+                
                 # Extract text and create chunks
-                chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+                chunks = parse_and_chunk(processing_path, file_ext, chunk_size=50, max_chunks=500)
                 
                 if not chunks:
                     print(f"❌ V2 No content extracted from {filename}")
@@ -5279,15 +5465,22 @@ def upload_file_v2():
                 # Notify Node.js backend: completed
                 notify_backend_status(file_id, user_id, 'completed', True)
                 
+                # Clean up temporary files only after successful completion
+                for cleanup_path in [save_path, backup_path]:
+                    if cleanup_path and os.path.exists(cleanup_path):
+                        os.remove(cleanup_path)
+                        print(f"🗑️ V2 Cleaned up: {cleanup_path}")
+                
             except Exception as e:
                 print(f"❌ V2 Processing error for {filename}: {str(e)}")
                 traceback.print_exc()
                 notify_backend_status(file_id, user_id, 'failed', False, str(e))
-            finally:
-                # Clean up temporary file
-                if save_path and os.path.exists(save_path):
-                    os.remove(save_path)
-                    print(f"🗑️ V2 Cleaned up: {save_path}")
+                
+                # Clean up temporary files on error too
+                for cleanup_path in [save_path, backup_path]:
+                    if cleanup_path and os.path.exists(cleanup_path):
+                        os.remove(cleanup_path)
+                        print(f"🗑️ V2 Cleaned up after error: {cleanup_path}")
         
         # Start processing in background
         processing_thread = Thread(target=process_file_v2_async, daemon=True)
@@ -5390,6 +5583,165 @@ def get_file_status_v2():
     except Exception as e:
         print(f"❌ V2 Status check error: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
+
+@app.route("/process-project-support-embedding", methods=["POST", "OPTIONS"])
+def process_project_support_embedding():
+    """Process embeddings for project support documents (called from care-proposals backend) with WebSocket updates"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    if not OPENAI_AVAILABLE:
+        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+        
+    save_path = None
+    try:
+        org_id = request.args.get("orgId")
+        project_id = request.args.get("projectId")
+        file_id = request.args.get("fileId")
+        upload_id = request.args.get("uploadId", str(uuid.uuid4()))
+        user_id = request.args.get("userId")  # For WebSocket notifications
+        
+        if not org_id or not project_id or not file_id:
+            return jsonify({"error": "orgId, projectId, and fileId are required"}), 400
+
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+
+        file = request.files["file"]
+        filename = file.filename
+        file_ext = filename.split(".")[-1].lower()
+
+        # Save file temporarily
+        save_path = os.path.abspath(os.path.join(UPLOAD_FOLDER, f"{upload_id}_{filename}"))
+        file.save(save_path)
+        
+        print(f"🚀 Processing project support file: {filename} (Project: {project_id})")
+        
+        # Send initial status
+        if user_id:
+            notify_backend_status(file_id, user_id, "processing", False)
+        
+        # Process file in background thread
+        def process_project_support_file_async():
+            try:
+                # Send processing status
+                if user_id:
+                    notify_backend_status(file_id, user_id, "extracting", False)
+                
+                # Extract text and create chunks
+                chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+                
+                if not chunks:
+                    print(f"❌ No content extracted from {filename}")
+                    if user_id:
+                        notify_backend_status(file_id, user_id, "failed", False, "No content extracted from file")
+                    return
+                    
+                # Send embedding status
+                if user_id:
+                    notify_backend_status(file_id, user_id, "embedding", False)
+                
+                # Generate embeddings
+                embeddings = embed_chunks(chunks, upload_id=upload_id, org_id=org_id, filename=filename)
+                
+                # Store in project-specific Firestore collection structure
+                # STEP 1: Create/update the ORG parent document
+                org_doc_ref = db.collection("org_project_support_embeddings").document(f"org-{org_id}")
+                org_doc_ref.set({
+                    "org_id": org_id,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "last_updated": firestore.SERVER_TIMESTAMP,
+                    "project_count": firestore.Increment(1)
+                }, merge=True)
+                
+                # STEP 2: Create/update the PROJECT parent document  
+                project_parent_ref = org_doc_ref.collection("projects").document(f"project-{project_id}")
+                project_parent_ref.set({
+                    "project_id": project_id,
+                    "org_id": org_id,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "last_updated": firestore.SERVER_TIMESTAMP,
+                    "file_count": firestore.Increment(1)
+                }, merge=True)
+                
+                # STEP 3: Create the file document
+                project_doc_ref = project_parent_ref.collection("files").document(file_id)
+                project_doc_ref.set({
+                    "filename": filename,
+                    "file_id": file_id,
+                    "upload_id": upload_id,
+                    "project_id": project_id,
+                    "org_id": org_id,
+                    "file_type": file_ext,
+                    "document_type": "project_support",
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "chunk_count": len(chunks),
+                    "processing_version": "4.2.0"
+                })
+                
+                # STEP 4: Store chunks in batches
+                batch_size = 10
+                total_chunks = len(chunks)
+                
+                for i in range(0, total_chunks, batch_size):
+                    batch = db.batch()
+                    end_idx = min(i + batch_size, total_chunks)
+                    
+                    for j in range(i, end_idx):
+                        chunk_ref = project_doc_ref.collection("chunks").document(str(j))
+                        batch.set(chunk_ref, {
+                            "content": chunks[j],
+                            "embedding": embeddings[j],
+                            "index": j
+                        })
+                    
+                    batch.commit()
+                    del batch
+                
+                print(f"✅ Successfully processed project support document {filename} for Project: {project_id}")
+                
+                # Send completion status
+                if user_id:
+                    notify_backend_status(file_id, user_id, "completed", True)
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f"❌ Async project support processing error: {error_msg}")
+                traceback.print_exc()
+                
+                # Send error status
+                if user_id:
+                    notify_backend_status(file_id, user_id, "failed", False, error_msg)
+                
+            finally:
+                if save_path and os.path.exists(save_path):
+                    try:
+                        os.remove(save_path)
+                    except Exception as e:
+                        print(f"Error deleting file: {e}")
+        
+        # Start processing in background thread
+        processing_thread = Thread(target=process_project_support_file_async)
+        processing_thread.daemon = False
+        processing_thread.start()
+        
+        return jsonify({
+            "message": "Project support document embedding started",
+            "file_id": file_id,
+            "upload_id": upload_id,
+            "project_id": project_id,
+            "org_id": org_id,
+            "file_type": file_ext,
+            "document_type": "project_support"
+        }), 202
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Project Support Document Embedding Error: {error_msg}")
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8002))
