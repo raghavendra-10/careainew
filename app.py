@@ -906,29 +906,56 @@ try:
     from google.oauth2 import service_account
     
     cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "fire.json")
-    if os.path.exists(cred_path):
-        print(f"✅ Found credentials file at {cred_path}")
-        
-        firebase_cred = credentials.Certificate(cred_path)
-        initialize_app(firebase_cred)
-        db = firestore.client()
-        FIREBASE_AVAILABLE = True
-        print("✅ Successfully initialized Firebase")
-        
-        try:
-            from vertexai import init as vertex_init
-            from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-            
-            project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "buildnblog-450618")
-            gcp_credentials = service_account.Credentials.from_service_account_file(cred_path)
-            aiplatform.init(project=project_id, location="us-central1", credentials=gcp_credentials)
-            vertex_init(project=project_id, location="us-central1")
-            VERTEX_AVAILABLE = True
-            print("✅ Successfully initialized Vertex AI")
-        except Exception as e:
-            print(f"⚠️ Vertex AI initialization failed: {str(e)}")
+    
+    # For Firebase/Firestore, always use fire.json with buildnblog project
+    if os.path.exists("fire.json"):
+        # Use fire.json for Firebase/Firestore (buildnblog-450618 project)
+        firebase_cred = credentials.Certificate("fire.json")
+        print("✅ Using fire.json for Firebase/Firestore")
+    elif cred_path.startswith("{"):
+        # Fallback: parse JSON from environment but this might not have Firestore access
+        import json
+        cred_dict = json.loads(cred_path)
+        firebase_cred = credentials.Certificate(cred_dict)
+        print("✅ Using environment credentials for Firebase (may not have Firestore access)")
     else:
-        print(f"⚠️ Credentials file not found at {cred_path}. Firebase features will be disabled.")
+        # Fallback to file path
+        firebase_cred = credentials.Certificate(cred_path)
+        print(f"✅ Using {cred_path} for Firebase")
+    
+    initialize_app(firebase_cred)
+    db = firestore.client()
+    FIREBASE_AVAILABLE = True
+    print("✅ Successfully initialized Firebase")
+        
+    try:
+        from vertexai import init as vertex_init
+        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+        
+        # Allow separate project IDs for different services
+        project_id = os.environ.get("VERTEX_AI_PROJECT", os.environ.get("GOOGLE_CLOUD_PROJECT", "buildnblog-450618"))
+        
+        # For Vertex AI, always use fire.json file if it exists, otherwise use env credentials
+        if os.path.exists("fire.json"):
+            # Use fire.json for Vertex AI (buildnblog-450618 project)
+            vertex_credentials = service_account.Credentials.from_service_account_file("fire.json")
+            print("✅ Using fire.json for Vertex AI")
+        elif cred_path.startswith("{"):
+            # Fallback to environment JSON
+            vertex_credentials = service_account.Credentials.from_service_account_info(cred_dict)
+            print("✅ Using environment credentials for Vertex AI")
+        else:
+            # Fallback to file path
+            vertex_credentials = service_account.Credentials.from_service_account_file(cred_path)
+            print(f"✅ Using {cred_path} for Vertex AI")
+            
+        aiplatform.init(project=project_id, location="us-central1", credentials=vertex_credentials)
+        vertex_init(project=project_id, location="us-central1")
+        VERTEX_AVAILABLE = True
+        print("✅ Successfully initialized Vertex AI")
+    except Exception as e:
+        print(f"⚠️ Vertex AI initialization failed: {str(e)}")
+
 except Exception as e:
     print(f"⚠️ Firebase initialization failed: {str(e)}")
 
@@ -3958,6 +3985,278 @@ def delete_project_support_document():
         print(f"❌ Delete Project Support Document Error: {error_msg}")
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
+@app.route("/run-agent-v2", methods=["POST", "OPTIONS"])
+def run_agent_v2():
+    """V2 Agent runner with WebSocket support and database storage"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "AI generation service is not available"}), 503
+        
+    try:
+        data = request.get_json(silent=True) or {}
+        agent_run_id = data.get("agentRunId")
+        agent_id = data.get("agentId")
+        agent_type = data.get("agentType")
+        org_id = data.get("orgId")
+        user_id = data.get("userId")
+        project_id = data.get("projectId")
+        project_file = data.get("projectFile", {})
+        
+        print(f"🤖 Starting V2 Agent: {agent_id} (Type: {agent_type}), Run ID: {agent_run_id}")
+        
+        if not agent_run_id or not agent_id or not org_id or not user_id:
+            return jsonify({"error": "agentRunId, agentId, orgId, and userId are required"}), 400
+            
+        if not project_file or not project_file.get("gcpUrl"):
+            return jsonify({"error": "projectFile with gcpUrl is required"}), 400
+
+        # Send initial status update
+        notify_agent_status(agent_run_id, user_id, "running", False)
+        
+        def process_agent_v2_async():
+            start_time = time.time()
+            try:
+                # Download file from GCP
+                notify_agent_status(agent_run_id, user_id, "downloading", False)
+                
+                file_content = download_file_from_gcp(project_file["gcpUrl"])
+                if not file_content:
+                    raise Exception("Failed to download file from GCP")
+                
+                filename = project_file["filename"]
+                file_type = project_file["fileType"]
+                
+                # Save file temporarily
+                temp_file_path = os.path.join(UPLOAD_FOLDER, f"{agent_run_id}_{filename}")
+                with open(temp_file_path, 'wb') as f:
+                    f.write(file_content)
+                
+                notify_agent_status(agent_run_id, user_id, "processing", False)
+                
+                # Process based on agent type
+                if agent_type == "question_generator":
+                    result = process_question_generator_v2(temp_file_path, filename, agent_run_id, user_id)
+                else:
+                    raise Exception(f"Unsupported agent type: {agent_type}")
+                
+                # Calculate duration
+                end_time = time.time()
+                duration = int(end_time - start_time)
+                
+                # Send results to backend
+                notify_agent_completion(agent_run_id, user_id, result, duration)
+                
+                print(f"✅ V2 Agent completed successfully: {agent_run_id}")
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f"❌ V2 Agent Error: {error_msg}")
+                traceback.print_exc()
+                
+                # Calculate duration even for failures
+                end_time = time.time()
+                duration = int(end_time - start_time)
+                
+                # Send error status
+                notify_agent_error(agent_run_id, user_id, error_msg, duration)
+                
+            finally:
+                # Clean up temp file
+                if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                    except:
+                        pass
+        
+        # Start processing in background
+        agent_thread = Thread(target=process_agent_v2_async)
+        agent_thread.daemon = False
+        agent_thread.start()
+        
+        return jsonify({
+            "message": "V2 Agent started successfully",
+            "agent_run_id": agent_run_id,
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+            "status": "running"
+        }), 202
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ V2 Agent startup error: {error_msg}")
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+def download_file_from_gcp(gcp_url):
+    """Download file from GCP URL"""
+    try:
+        # Extract bucket and path from gs:// URL
+        if not gcp_url.startswith("gs://"):
+            raise Exception("Invalid GCP URL format")
+            
+        # Remove gs:// prefix
+        path = gcp_url[5:]
+        bucket_name = path.split('/')[0]
+        file_path = '/'.join(path.split('/')[1:])
+        
+        print(f"📥 Downloading from GCP: {bucket_name}/{file_path}")
+        
+        # Download using Google Cloud Storage client with credentials
+        from google.cloud import storage
+        
+        # For GCS buckets, use environment credentials (care-proposals-451406 project)
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "fire.json")
+        if cred_path.startswith("{"):
+            # JSON string from environment - this has bucket access
+            import json
+            from google.oauth2 import service_account
+            cred_dict = json.loads(cred_path)
+            bucket_credentials = service_account.Credentials.from_service_account_info(cred_dict)
+            client = storage.Client(credentials=bucket_credentials, project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
+            print("✅ Using environment credentials for GCS bucket access")
+        else:
+            # Fallback to file path or default credentials
+            client = storage.Client()
+            print("✅ Using default/file credentials for GCS bucket access")
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(file_path)
+        
+        return blob.download_as_bytes()
+        
+    except Exception as e:
+        print(f"❌ GCP download error: {str(e)}")
+        return None
+
+def process_question_generator_v2(file_path, filename, agent_run_id, user_id):
+    """Process question generation for V2 agent"""
+    try:
+        notify_agent_status(agent_run_id, user_id, "extracting", False)
+        
+        # Extract questions using existing AI function
+        questions = extract_questions_with_ai_direct(file_path, filename)
+        
+        notify_agent_status(agent_run_id, user_id, "generating", False)
+        
+        if questions and len(questions) > 0:
+            result = {
+                "agent_type": "question_generator",
+                "questions": questions,
+                "total_questions": len(questions),
+                "file_processed": {
+                    "filename": filename,
+                    "questions_extracted": len(questions)
+                },
+                "processing_version": "v2.0.0",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            print(f"✅ Generated {len(questions)} questions from {filename}")
+            return result
+        else:
+            raise Exception("No questions could be extracted from the file")
+            
+    except Exception as e:
+        print(f"❌ Question generation error: {str(e)}")
+        raise e
+
+def notify_agent_status(agent_run_id, user_id, status, is_complete, error=None):
+    """Send agent status update to backend via webhook"""
+    try:
+        backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8080")
+        webhook_url = f"{backend_api_url}/api/v2/agents/webhook/status"
+        
+        payload = {
+            "agentRunId": agent_run_id,
+            "userId": user_id,
+            "status": status,
+            "isComplete": is_complete,
+            "timestamp": datetime.now().isoformat(),
+            "source": "flask_ai_v2"
+        }
+        
+        if error:
+            payload["error"] = error
+            
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ Agent status webhook sent: {agent_run_id} → {status}")
+        else:
+            print(f"⚠️ Agent webhook failed: {response.status_code}")
+            
+    except Exception as e:
+        print(f"❌ Agent webhook error: {str(e)}")
+
+def notify_agent_completion(agent_run_id, user_id, result, duration):
+    """Send agent completion notification with results"""
+    try:
+        backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8080")
+        webhook_url = f"{backend_api_url}/api/v2/agents/webhook/completion"
+        
+        payload = {
+            "agentRunId": agent_run_id,
+            "userId": user_id,
+            "status": "completed",
+            "isComplete": True,
+            "duration": duration,
+            "result": result,
+            "timestamp": datetime.now().isoformat(),
+            "source": "flask_ai_v2"
+        }
+            
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ Agent completion webhook sent: {agent_run_id}")
+        else:
+            print(f"⚠️ Agent completion webhook failed: {response.status_code}")
+            
+    except Exception as e:
+        print(f"❌ Agent completion webhook error: {str(e)}")
+
+def notify_agent_error(agent_run_id, user_id, error_message, duration):
+    """Send agent error notification"""
+    try:
+        backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8080")
+        webhook_url = f"{backend_api_url}/api/v2/agents/webhook/error"
+        
+        payload = {
+            "agentRunId": agent_run_id,
+            "userId": user_id,
+            "status": "failed",
+            "isComplete": True,
+            "duration": duration,
+            "error": error_message,
+            "timestamp": datetime.now().isoformat(),
+            "source": "flask_ai_v2"
+        }
+            
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ Agent error webhook sent: {agent_run_id}")
+        else:
+            print(f"⚠️ Agent error webhook failed: {response.status_code}")
+            
+    except Exception as e:
+        print(f"❌ Agent error webhook error: {str(e)}")
+
 # Add this new endpoint to your Python Flask application
 
 @app.route("/run-question-agent", methods=["POST", "OPTIONS"])
@@ -5741,6 +6040,358 @@ def process_project_support_embedding():
     except Exception as e:
         error_msg = str(e)
         print(f"❌ Project Support Document Embedding Error: {error_msg}")
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+# ================================
+# AGENT RESPONSES API v2
+# ================================
+
+@app.route("/api/v2/agent-responses/run/<agent_run_id>", methods=["GET", "OPTIONS"])
+def get_agent_responses_for_run(agent_run_id):
+    """Get agent responses for a specific agent run"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    try:
+        # Get query parameters for filtering
+        status = request.args.get('status')
+        assigned_user = request.args.get('assignedUser')
+        priority = request.args.get('priority')
+        
+        print(f"🤖 Getting agent responses for run: {agent_run_id}")
+        
+        # Make request to backend
+        backend_api_url = os.getenv('BACKEND_API_URL', 'http://localhost:8080')
+        url = f"{backend_api_url}/api/v2/agent-responses/run/{agent_run_id}"
+        
+        params = {}
+        if status:
+            params['status'] = status
+        if assigned_user:
+            params['assignedUser'] = assigned_user
+        if priority:
+            params['priority'] = priority
+            
+        headers = {}
+        if 'Authorization' in request.headers:
+            headers['Authorization'] = request.headers['Authorization']
+        
+        response = requests.get(url, params=params, headers=headers)
+        
+        if response.status_code == 200:
+            return jsonify(response.json()), 200
+        else:
+            return jsonify({"error": "Failed to fetch agent responses"}), response.status_code
+            
+    except Exception as e:
+        print(f"❌ Get agent responses error: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route("/api/v2/agent-responses/<response_id>", methods=["GET", "OPTIONS"])
+def get_agent_response_details(response_id):
+    """Get specific agent response details"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    try:
+        print(f"🤖 Getting agent response details: {response_id}")
+        
+        # Make request to backend
+        backend_api_url = os.getenv('BACKEND_API_URL', 'http://localhost:8080')
+        url = f"{backend_api_url}/api/v2/agent-responses/{response_id}"
+        
+        headers = {}
+        if 'Authorization' in request.headers:
+            headers['Authorization'] = request.headers['Authorization']
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            return jsonify(response.json()), 200
+        else:
+            return jsonify({"error": "Failed to fetch agent response details"}), response.status_code
+            
+    except Exception as e:
+        print(f"❌ Get agent response details error: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route("/api/v2/agent-responses/<response_id>", methods=["PUT", "OPTIONS"])
+def update_agent_response(response_id):
+    """Update an agent response"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+            
+        print(f"🤖 Updating agent response: {response_id}")
+        
+        # Make request to backend
+        backend_api_url = os.getenv('BACKEND_API_URL', 'http://localhost:8080')
+        url = f"{backend_api_url}/api/v2/agent-responses/{response_id}"
+        
+        headers = {'Content-Type': 'application/json'}
+        if 'Authorization' in request.headers:
+            headers['Authorization'] = request.headers['Authorization']
+        
+        response = requests.put(url, json=data, headers=headers)
+        
+        if response.status_code == 200:
+            return jsonify(response.json()), 200
+        else:
+            return jsonify({"error": "Failed to update agent response"}), response.status_code
+            
+    except Exception as e:
+        print(f"❌ Update agent response error: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route("/api/v2/agent-responses/<response_id>/assign", methods=["POST", "OPTIONS"])
+def assign_users_to_agent_response(response_id):
+    """Assign users to an agent response"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+            
+        print(f"🤖 Assigning users to agent response: {response_id}")
+        
+        # Make request to backend
+        backend_api_url = os.getenv('BACKEND_API_URL', 'http://localhost:8080')
+        url = f"{backend_api_url}/api/v2/agent-responses/{response_id}/assign"
+        
+        headers = {'Content-Type': 'application/json'}
+        if 'Authorization' in request.headers:
+            headers['Authorization'] = request.headers['Authorization']
+        
+        response = requests.post(url, json=data, headers=headers)
+        
+        if response.status_code == 200:
+            return jsonify(response.json()), 200
+        else:
+            return jsonify({"error": "Failed to assign users"}), response.status_code
+            
+    except Exception as e:
+        print(f"❌ Assign users error: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+# ================================
+# RESPONSE GENERATION API v2
+# ================================
+
+@app.route("/api/v2/generate-response", methods=["POST", "OPTIONS"])
+def generate_response_v2():
+    """Generate response based on project knowledge type (global or specific)"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    if not OPENAI_AVAILABLE:
+        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+        
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "AI generation service is not available"}), 503
+        
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        query = data.get("query")
+        project_id = data.get("projectId")
+        org_id = data.get("orgId")
+        knowledge_base_option = data.get("knowledgeBaseOption", "global")  # "global" or "specific"
+        
+        if not query or not project_id or not org_id:
+            return jsonify({"error": "Query, projectId, and orgId are required."}), 400
+
+        print(f"🤖 Processing v2 response generation: '{query}' for Project: {project_id}, Org: {org_id}, Knowledge: {knowledge_base_option}")
+
+        if knowledge_base_option == "global":
+            # Use global knowledge base (like /chat endpoint)
+            print("🌐 Using global knowledge base")
+            
+            # Get query embedding
+            query_embedding = np.array(embed_query(query))
+            retrieved_docs = []
+
+            # Search organization-level documents (global knowledge base)
+            org_files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+            org_files = org_files_ref.stream()
+            
+            # Process each organization file
+            for file_doc in org_files:
+                file_data = file_doc.to_dict()
+                
+                # Get chunks for this file
+                chunks_ref = file_doc.reference.collection("chunks")
+                chunks = chunks_ref.stream()
+                
+                # Process each chunk
+                for chunk_doc in chunks:
+                    chunk_data = chunk_doc.to_dict()
+                    
+                    # Convert to numpy array
+                    chunk_embedding = np.array(chunk_data["embedding"])
+                    
+                    # Calculate cosine similarity
+                    score = np.dot(query_embedding, chunk_embedding) / (
+                        np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
+                    )
+                    
+                    if score >= 0.2:  # Similarity threshold
+                        retrieved_docs.append({
+                            "content": chunk_data["content"], 
+                            "score": float(score),
+                            "filename": file_data.get("filename", "Unknown"),
+                            "file_id": file_data.get("file_id", file_doc.id),
+                            "file_type": file_data.get("file_type", "unknown"),
+                            "document_source": "organization",
+                            "source_type": "global"
+                        })
+
+            # Get top chunks by similarity
+            top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
+
+            if not top_chunks:
+                return jsonify({
+                    "query": query,
+                    "project_id": project_id,
+                    "org_id": org_id,
+                    "knowledge_type": "global",
+                    "answer": "No relevant information found in the global knowledge base.",
+                    "source_files": []
+                }), 200
+
+            # Generate answer
+            context_chunks = [doc["content"] for doc in top_chunks]
+            answer = generate_answer_with_gcp(query, context_chunks)
+            
+            # Get unique source files
+            source_files = []
+            seen_files = set()
+            for doc in top_chunks:
+                file_key = f"{doc['filename']}_{doc['file_type']}"
+                if file_key not in seen_files:
+                    source_files.append({
+                        "filename": doc["filename"],
+                        "file_id": doc["file_id"],
+                        "file_type": doc["file_type"],
+                        "source": doc["document_source"]
+                    })
+                    seen_files.add(file_key)
+
+            return jsonify({
+                "query": query,
+                "project_id": project_id,
+                "org_id": org_id,
+                "knowledge_type": "global",
+                "answer": answer,
+                "source_files": source_files,
+                "retrieved_chunks": len(top_chunks)
+            }), 200
+
+        else:
+            # Use specific project support documents (like /chat-rfp endpoint)
+            print("📁 Using specific project support documents")
+            
+            # Get query embedding
+            query_embedding = np.array(embed_query(query))
+
+            # Get project support documents using new structure
+            project_files_ref = (db.collection("org_project_support_embeddings")
+                               .document(f"org-{org_id}")
+                               .collection("projects")
+                               .document(f"project-{project_id}")
+                               .collection("files"))
+            
+            files = project_files_ref.stream()
+            retrieved_docs = []
+            
+            # Process each file
+            for file_doc in files:
+                file_data = file_doc.to_dict()
+                
+                # Get chunks for this file
+                chunks_ref = file_doc.reference.collection("chunks")
+                chunks = chunks_ref.stream()
+                
+                # Process each chunk
+                for chunk_doc in chunks:
+                    chunk_data = chunk_doc.to_dict()
+                    
+                    # Convert to numpy array
+                    chunk_embedding = np.array(chunk_data["embedding"])
+                    
+                    # Calculate cosine similarity
+                    score = np.dot(query_embedding, chunk_embedding) / (
+                        np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
+                    )
+                    
+                    if score >= 0.2:  # Similarity threshold
+                        retrieved_docs.append({
+                            "content": chunk_data["content"], 
+                            "score": float(score),
+                            "filename": file_data.get("filename", "Unknown"),
+                            "file_id": file_data.get("file_id", file_doc.id),
+                            "file_type": file_data.get("file_type", "unknown"),
+                            "document_type": "support",
+                            "processing_version": file_data.get("processing_version", "legacy")
+                        })
+
+            # Get top chunks by similarity
+            top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
+
+            if not top_chunks:
+                return jsonify({
+                    "query": query,
+                    "project_id": project_id,
+                    "org_id": org_id,
+                    "knowledge_type": "specific",
+                    "answer": "No relevant information found in the project support documents.",
+                    "source_files": [],
+                    "storage_structure": f"org_project_support_embeddings/org-{org_id}/projects/project-{project_id}/files"
+                }), 200
+
+            # Generate answer
+            context_chunks = [doc["content"] for doc in top_chunks]
+            answer = generate_answer_with_gcp(query, context_chunks)
+            
+            # Get unique source files
+            source_files = []
+            seen_files = set()
+            for doc in top_chunks:
+                file_key = f"{doc['filename']}_{doc['file_type']}"
+                if file_key not in seen_files:
+                    source_files.append({
+                        "filename": doc["filename"],
+                        "file_id": doc["file_id"],
+                        "file_type": doc["file_type"],
+                        "document_type": doc["document_type"]
+                    })
+                    seen_files.add(file_key)
+
+            return jsonify({
+                "query": query,
+                "project_id": project_id,
+                "org_id": org_id,
+                "knowledge_type": "specific",
+                "answer": answer,
+                "source_files": source_files,
+                "retrieved_chunks": len(top_chunks),
+                "storage_structure": f"org_project_support_embeddings/org-{org_id}/projects/project-{project_id}/files"
+            }), 200
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Generate Response v2 Error: {error_msg}")
+        traceback.print_exc()
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
 if __name__ == "__main__":
