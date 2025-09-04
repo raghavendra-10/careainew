@@ -5055,6 +5055,251 @@ Provide only the bullet points without any additional explanations or formatting
             "success": False
         }), 500
 
+@app.route("/api/v2/text-operations", methods=["POST", "OPTIONS"])
+def text_operations_v2():
+    """V2 Text operations with knowledge base support and custom prompts"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "AI generation service is not available"}), 503
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    if not OPENAI_AVAILABLE:
+        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+        
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        selected_text = data.get("selectedText")
+        operation = data.get("operation")  # rewrite, summarize, expand, improve, custom, etc.
+        custom_prompt = data.get("customPrompt", "")  # Custom prompt for 'custom' operation
+        project_id = data.get("projectId")
+        org_id = data.get("orgId")
+        knowledge_base_option = data.get("knowledgeBaseOption", "global")  # "global" or "specific"
+        
+        if not selected_text:
+            return jsonify({"error": "selectedText is required"}), 400
+            
+        if not operation:
+            return jsonify({"error": "operation is required"}), 400
+            
+        if operation == "custom" and not custom_prompt:
+            return jsonify({"error": "customPrompt is required for custom operation"}), 400
+
+        print(f"🔧 V2 Text operation: {operation} on text: {selected_text[:100]}... (Knowledge: {knowledge_base_option})")
+
+        # Define operation prompts - same as v1 but enhanced
+        operation_prompts = {
+            "rewrite": f"""Rewrite the following text to make it clearer and more professional while maintaining the same meaning:
+
+Text: {selected_text}
+
+Provide only the rewritten text without any additional explanations or formatting.""",
+            "expand": f"""Expand the following text with more detail and explanation while maintaining the same tone and style:
+
+Text: {selected_text}
+
+Provide only the expanded text without any additional explanations or formatting.""",
+            "simplify": f"""Simplify the following text to make it easier to understand while keeping the essential meaning:
+
+Text: {selected_text}
+
+Provide only the simplified text without any additional explanations or formatting.""",
+            "formalize": f"""Make the following text more formal and professional in tone:
+
+Text: {selected_text}
+
+Provide only the formalized text without any additional explanations or formatting.""",
+            "casual": f"""Make the following text more casual and conversational while maintaining professionalism:
+
+Text: {selected_text}
+
+Provide only the casual version without any additional explanations or formatting.""",
+            "shorten": f"""Shorten the following text while keeping the key information and main message:
+
+Text: {selected_text}
+
+Provide only the shortened text without any additional explanations or formatting.""",
+            "grammar": f"""Fix any grammar, spelling, and punctuation errors in the following text:
+
+Text: {selected_text}
+
+Provide only the corrected text without any additional explanations or formatting.""",
+            "professional": f"""Make the following text more professional and business-appropriate:
+
+Text: {selected_text}
+
+Provide only the professional version without any additional explanations or formatting.""",
+            "summarize": f"""Summarize the following text concisely while retaining the key points:
+
+Text: {selected_text}
+
+Provide only the summary without any additional explanations or formatting.""",
+            "improve": f"""Improve the following text for better clarity, grammar, flow, and professionalism:
+
+Text: {selected_text}
+
+Provide only the improved text without any additional explanations or formatting.""",
+            "bullet_points": f"""Convert the following text into clear, well-organized bullet points:
+
+Text: {selected_text}
+
+Provide only the bullet points without any additional explanations or formatting.""",
+            "custom": custom_prompt + f"""
+
+Text to process: {selected_text}
+
+Provide only the processed text without any additional explanations or formatting."""
+        }
+
+        if operation not in operation_prompts:
+            supported_ops = list(operation_prompts.keys())
+            return jsonify({
+                "error": f"Unsupported operation: {operation}. Supported operations: {', '.join(supported_ops)}"
+            }), 400
+
+        base_prompt = operation_prompts[operation]
+        
+        # Add knowledge base context if project info is provided
+        context_chunks = []
+        if project_id and org_id:
+            query_embedding = np.array(embed_query(selected_text))
+            
+            if knowledge_base_option == "global":
+                # Search organization-level documents (global knowledge base)
+                print("🌐 Using global knowledge base for text operations")
+                org_files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+                org_files = org_files_ref.stream()
+                
+                retrieved_docs = []
+                for file_doc in org_files:
+                    file_data = file_doc.to_dict()
+                    chunks_ref = file_doc.reference.collection("chunks")
+                    chunks = chunks_ref.stream()
+                    
+                    for chunk_doc in chunks:
+                        chunk_data = chunk_doc.to_dict()
+                        chunk_embedding = np.array(chunk_data["embedding"])
+                        score = np.dot(query_embedding, chunk_embedding) / (
+                            np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
+                        )
+                        
+                        if score >= 0.15:  # Lower threshold for context
+                            # Handle different chunk storage formats: "content" (v3.0.0) or "text" (v2)
+                            chunk_content = chunk_data.get("content") or chunk_data.get("text", "")
+                            retrieved_docs.append({
+                                "content": chunk_content, 
+                                "score": float(score)
+                            })
+                
+                context_chunks = [doc["content"] for doc in sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:3]]
+                
+            elif knowledge_base_option == "specific":
+                # Use project-specific support documents
+                print("📁 Using specific project support documents for text operations")
+                project_files_ref = (db.collection("org_project_support_embeddings")
+                                   .document(f"org-{org_id}")
+                                   .collection("projects")
+                                   .document(f"project-{project_id}")
+                                   .collection("files"))
+                
+                files = project_files_ref.stream()
+                retrieved_docs = []
+                
+                for file_doc in files:
+                    file_data = file_doc.to_dict()
+                    chunks_ref = file_doc.reference.collection("chunks")
+                    chunks = chunks_ref.stream()
+                    
+                    for chunk_doc in chunks:
+                        chunk_data = chunk_doc.to_dict()
+                        chunk_embedding = np.array(chunk_data["embedding"])
+                        score = np.dot(query_embedding, chunk_embedding) / (
+                            np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
+                        )
+                        
+                        if score >= 0.15:  # Lower threshold for context
+                            # Handle different chunk storage formats: "content" (v3.0.0) or "text" (v2)
+                            chunk_content = chunk_data.get("content") or chunk_data.get("text", "")
+                            retrieved_docs.append({
+                                "content": chunk_content, 
+                                "score": float(score)
+                            })
+                
+                context_chunks = [doc["content"] for doc in sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:3]]
+
+        # Enhance prompt with knowledge base context
+        final_prompt = base_prompt
+        if context_chunks:
+            context_text = "\n\n".join(context_chunks)
+            final_prompt += f"\n\nRelevant context from your knowledge base:\n{context_text[:1000]}...\n\nUse this context to inform your response but focus on processing the text as requested."
+
+        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+        model = GenerativeModel("gemini-2.0-flash")
+
+        response = model.generate_content(
+            [Part.from_text(final_prompt)],
+            generation_config={
+                "max_output_tokens": 2048,
+                "temperature": 0.3,
+                "top_p": 0.8,
+            },
+            safety_settings=[
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+            ],
+            stream=False
+        )
+
+        processed_text = response.text.strip()
+
+        if not processed_text:
+            return jsonify({"error": "AI returned empty response"}), 500
+
+        print(f"✅ V2 Text operation '{operation}' completed successfully with {knowledge_base_option} knowledge")
+
+        return jsonify({
+            "original_text": selected_text,
+            "operation": operation,
+            "processed_text": processed_text,
+            "success": True,
+            "knowledge_type": knowledge_base_option,
+            "context_used": len(context_chunks) > 0,
+            "character_count": {
+                "original": len(selected_text),
+                "processed": len(processed_text)
+            }
+        }), 200
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ V2 Text Operation Error: {error_msg}")
+        traceback.print_exc()
+        return jsonify({
+            "error": "Internal server error", 
+            "details": error_msg,
+            "success": False
+        }), 500
+
 # Add this endpoint to your existing Python Flask application after the /run-question-agent-with-upload endpoint
 
 # Add this endpoint to your existing Python Flask application after the /run-question-agent-with-upload endpoint
@@ -6246,8 +6491,10 @@ def generate_response_v2():
                     )
                     
                     if score >= 0.2:  # Similarity threshold
+                        # Handle different chunk storage formats: "content" (v3.0.0) or "text" (v2)
+                        chunk_content = chunk_data.get("content") or chunk_data.get("text", "")
                         retrieved_docs.append({
-                            "content": chunk_data["content"], 
+                            "content": chunk_content, 
                             "score": float(score),
                             "filename": file_data.get("filename", "Unknown"),
                             "file_id": file_data.get("file_id", file_doc.id),
@@ -6335,8 +6582,10 @@ def generate_response_v2():
                     )
                     
                     if score >= 0.2:  # Similarity threshold
+                        # Handle different chunk storage formats: "content" (v3.0.0) or "text" (v2)
+                        chunk_content = chunk_data.get("content") or chunk_data.get("text", "")
                         retrieved_docs.append({
-                            "content": chunk_data["content"], 
+                            "content": chunk_content, 
                             "score": float(score),
                             "filename": file_data.get("filename", "Unknown"),
                             "file_id": file_data.get("file_id", file_doc.id),
