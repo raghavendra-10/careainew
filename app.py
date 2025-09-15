@@ -9,7 +9,7 @@ import traceback
 import requests
 import re
 from datetime import datetime
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
 from threading import Thread, Lock
@@ -6643,13 +6643,1176 @@ def generate_response_v2():
         traceback.print_exc()
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
+# ================================
+# QUESTIONNAIRE RESPONSE GENERATION API
+# ================================
+
+@app.route("/api/v2/questionnaires/generate-response", methods=["POST", "OPTIONS"])
+def generate_questionnaire_response():
+    """Generate contextually appropriate responses for questionnaire questions based on response type"""
+    
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'No JSON data provided'}), 400
+        
+        questionnaire_id = data.get('questionnaireId')
+        question_text = data.get('questionText')
+        response_type = data.get('responseType', 'short_answer')
+        choices = data.get('choices', [])
+        context = data.get('context', {})
+        knowledge_base_option = data.get('knowledgeBaseOption', 'global')
+        org_id = data.get('orgId')
+        project_id = data.get('projectId')
+        
+        print(f"🎯 Questionnaire Generate: {question_text} ({response_type})")
+        
+        if not all([questionnaire_id, question_text, org_id, project_id]):
+            return jsonify({
+                'success': False,
+                'error': 'Missing required fields'
+            }), 400
+        
+        if not VERTEX_AVAILABLE:
+            return jsonify({
+                'success': False,
+                'error': 'Vertex AI service not available'
+            }), 500
+        
+        start_time = time.time()
+        
+        try:
+            knowledge_context = get_knowledge_base_context(
+                query=question_text,
+                org_id=org_id,
+                project_id=project_id,
+                knowledge_base_option=knowledge_base_option
+            )
+        except:
+            knowledge_context = "No specific context available."
+        
+        # Generate response based on type with strict formatting
+        if response_type == 'yes_no':
+            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nRespond with ONLY ONE WORD: either 'Yes' or 'No'. Nothing else."
+        elif response_type == 'true_false':
+            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nRespond with ONLY ONE WORD: either 'True' or 'False'. Nothing else."
+        elif response_type == 'single_choice' and choices:
+            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nAvailable options: {', '.join(choices)}\n\nRespond with ONLY the exact option text from the list above. Nothing else."
+        elif response_type == 'multi_choice' and choices:
+            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nAvailable options: {', '.join(choices)}\n\nRespond with ONLY the selected option names separated by commas. Example: 'Option1, Option3'. Nothing else."
+        elif response_type == 'completed_incomplete':
+            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nRespond with ONLY ONE WORD: either 'Complete' or 'Incomplete'. Nothing else."
+        elif response_type == 'long_answer':
+            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nProvide a comprehensive detailed answer with examples, background information, and specific details. Use multiple paragraphs if needed."
+        else:  # short_answer or default
+            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nProvide a concise, professional answer in 1-2 sentences."
+        
+        # Use Vertex AI Gemini with very low temperature
+        from vertexai.generative_models import GenerativeModel, GenerationConfig
+        model = GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(
+            prompt,
+            generation_config=GenerationConfig(
+                temperature=0.1,
+                max_output_tokens=500,
+                top_p=0.8,
+                top_k=10
+            )
+        )
+        
+        generated_text = response.text.strip()
+        
+        return jsonify({
+            'success': True,
+            'generatedResponse': generated_text,
+            'responseType': response_type,
+            'confidence': 0.9,
+            'knowledgeSource': knowledge_base_option,
+            'processingTime': round(time.time() - start_time, 2),
+            'timestamp': datetime.utcnow().isoformat() + 'Z'
+        })
+        
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# ================================
+# SPECIALIZED XLSX/CSV PROCESSING API
+# ================================
+
+@app.route("/api/v2/analyze-structured-document", methods=["POST", "OPTIONS"])
+def analyze_structured_document():
+    """
+    Analyze CSV/XLSX files and identify question cells that need user responses.
+    Returns structure with sheet names, questions, cell locations, and analysis.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "Vertex AI service is not available"}), 503
+    
+    try:
+        # Check if file is uploaded
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+        
+        # Validate file type
+        file_ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+        if file_ext not in ['csv', 'xlsx', 'xls']:
+            return jsonify({"error": "Only CSV, XLSX, and XLS files are supported"}), 400
+        
+        print(f"📊 Analyzing structured document: {file.filename}")
+        
+        # Save uploaded file temporarily
+        temp_filename = f"temp_{uuid.uuid4().hex[:8]}_{file.filename}"
+        temp_filepath = os.path.join(UPLOAD_FOLDER, temp_filename)
+        file.save(temp_filepath)
+        
+        # Process file based on type
+        if file_ext == 'csv':
+            analysis_result = analyze_csv_structure(temp_filepath, file.filename)
+        else:  # xlsx or xls
+            analysis_result = analyze_xlsx_structure(temp_filepath, file.filename)
+        
+        # Clean up temporary file
+        try:
+            os.remove(temp_filepath)
+        except:
+            pass
+        
+        return jsonify({
+            "success": True,
+            "filename": file.filename,
+            "analysis": analysis_result,
+            "timestamp": datetime.now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Document analysis error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Analysis failed: {str(e)}"
+        }), 500
+
+def analyze_xlsx_structure(filepath, filename):
+    """Analyze XLSX structure and identify question cells"""
+    try:
+        import pandas as pd
+        
+        excel_file = pd.ExcelFile(filepath)
+        sheet_names = excel_file.sheet_names
+        
+        analysis_result = {
+            "filename": filename,
+            "total_sheets": len(sheet_names),
+            "sheets": []
+        }
+        
+        # Get document context from AI
+        document_context = analyze_document_with_direct_ai(filepath, filename, [])
+        
+        for sheet_name in sheet_names:
+            df = pd.read_excel(filepath, sheet_name=sheet_name)
+            
+            # Identify question cells
+            question_cells = identify_question_cells_detailed(df, sheet_name)
+            
+            sheet_analysis = {
+                "sheet_name": sheet_name,
+                "rows": len(df),
+                "columns": len(df.columns),
+                "column_names": df.columns.tolist(),
+                "questions_found": len(question_cells),
+                "questions": question_cells
+            }
+            
+            analysis_result["sheets"].append(sheet_analysis)
+        
+        analysis_result["document_analysis"] = document_context.get("analysis", "")
+        
+        return analysis_result
+        
+    except Exception as e:
+        raise Exception(f"XLSX analysis error: {str(e)}")
+
+def analyze_csv_structure(filepath, filename):
+    """Analyze CSV structure and identify question cells"""
+    try:
+        import pandas as pd
+        
+        df = pd.read_csv(filepath)
+        
+        # Get document context from AI  
+        document_context = analyze_document_with_direct_ai(filepath, filename, [])
+        
+        # Identify question cells
+        question_cells = identify_question_cells_detailed(df, "Sheet1")
+        
+        analysis_result = {
+            "filename": filename,
+            "total_sheets": 1,
+            "sheets": [{
+                "sheet_name": "Sheet1",
+                "rows": len(df),
+                "columns": len(df.columns),
+                "column_names": df.columns.tolist(),
+                "questions_found": len(question_cells),
+                "questions": question_cells
+            }],
+            "document_analysis": document_context.get("analysis", "")
+        }
+        
+        return analysis_result
+        
+    except Exception as e:
+        raise Exception(f"CSV analysis error: {str(e)}")
+
+def identify_question_cells_detailed(df, sheet_name):
+    """
+    Identify question cells and return detailed information about each question
+    and where responses should be placed
+    """
+    question_cells = []
+    
+    # Question patterns
+    question_patterns = [
+        r'\?$',  # Ends with question mark
+        r'^\s*(?:what|how|when|where|why|which|who|describe|explain|provide|list)',
+        r'(?:requirement|required|needed|must|should|shall)',
+        r'(?:fill\s+in|complete|answer|respond|provide\s+details)',
+        r'(?:TBD|TBC|TODO|PENDING)',
+        r'(?:enter|input|specify|indicate|state)',
+    ]
+    
+    for row_idx, row in df.iterrows():
+        for col_idx, cell_value in enumerate(row):
+            cell_str = str(cell_value).strip() if not pd.isna(cell_value) else ""
+            
+            # Check if this cell contains a question
+            is_question = any(re.search(pattern, cell_str.lower()) for pattern in question_patterns) if cell_str else False
+            
+            if is_question and len(cell_str) > 10:  # Filter out very short matches
+                
+                # Find the best response cell location
+                response_location = find_response_cell_location(df, row_idx, col_idx)
+                
+                question_info = {
+                    "question_text": cell_str,
+                    "question_cell": {
+                        "row": row_idx + 1,  # 1-based indexing
+                        "column": df.columns[col_idx],
+                        "column_index": col_idx + 1,  # 1-based indexing
+                        "cell_reference": f"{chr(65 + col_idx)}{row_idx + 1}"
+                    },
+                    "response_cell": response_location,
+                    "question_type": categorize_question(cell_str),
+                    "sheet_name": sheet_name
+                }
+                
+                question_cells.append(question_info)
+    
+    return question_cells
+
+def find_response_cell_location(df, question_row, question_col):
+    """Find the best location for the response to a question"""
+    
+    # Strategy 1: Check right cell (same row, next column)
+    if question_col + 1 < len(df.columns):
+        right_cell_value = df.iloc[question_row, question_col + 1]
+        if pd.isna(right_cell_value) or str(right_cell_value).strip() == "":
+            return {
+                "row": question_row + 1,
+                "column": df.columns[question_col + 1],
+                "column_index": question_col + 2,
+                "cell_reference": f"{chr(65 + question_col + 1)}{question_row + 1}",
+                "location_type": "right_adjacent"
+            }
+    
+    # Strategy 2: Check cell below (next row, same column)
+    if question_row + 1 < len(df):
+        below_cell_value = df.iloc[question_row + 1, question_col]
+        if pd.isna(below_cell_value) or str(below_cell_value).strip() == "":
+            return {
+                "row": question_row + 2,
+                "column": df.columns[question_col],
+                "column_index": question_col + 1,
+                "cell_reference": f"{chr(65 + question_col)}{question_row + 2}",
+                "location_type": "below_adjacent"
+            }
+    
+    # Strategy 3: Check diagonal (next row, next column)
+    if question_row + 1 < len(df) and question_col + 1 < len(df.columns):
+        diagonal_cell_value = df.iloc[question_row + 1, question_col + 1]
+        if pd.isna(diagonal_cell_value) or str(diagonal_cell_value).strip() == "":
+            return {
+                "row": question_row + 2,
+                "column": df.columns[question_col + 1],
+                "column_index": question_col + 2,
+                "cell_reference": f"{chr(65 + question_col + 1)}{question_row + 2}",
+                "location_type": "diagonal_adjacent"
+            }
+    
+    # Default: suggest right adjacent even if not empty
+    if question_col + 1 < len(df.columns):
+        return {
+            "row": question_row + 1,
+            "column": df.columns[question_col + 1],
+            "column_index": question_col + 2,
+            "cell_reference": f"{chr(65 + question_col + 1)}{question_row + 1}",
+            "location_type": "right_suggested"
+        }
+    
+    return None
+
+def categorize_question(question_text):
+    """Categorize the type of question based on content"""
+    question_lower = question_text.lower()
+    
+    if any(word in question_lower for word in ['date', 'when', 'timeline', 'deadline']):
+        return "date"
+    elif any(word in question_lower for word in ['number', 'count', 'quantity', 'amount', 'how many']):
+        return "numeric"
+    elif any(word in question_lower for word in ['yes', 'no', 'true', 'false', 'confirm']):
+        return "boolean"
+    elif any(word in question_lower for word in ['describe', 'explain', 'detail', 'how']):
+        return "descriptive"
+    elif any(word in question_lower for word in ['list', 'enumerate', 'items']):
+        return "list"
+    else:
+        return "general"
+
+@app.route("/api/v2/process-structured-document", methods=["POST", "OPTIONS"])
+def process_structured_document():
+    """
+    Process CSV/XLSX files with multiple sheets, identify empty cells adjacent to questions,
+    use direct Vertex AI file upload for analysis, and reconstruct document with answers.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "Vertex AI service is not available"}), 503
+    
+    try:
+        # Check if file is uploaded
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+        
+        # Validate file type
+        file_ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+        if file_ext not in ['csv', 'xlsx', 'xls']:
+            return jsonify({"error": "Only CSV, XLSX, and XLS files are supported"}), 400
+        
+        print(f"📊 Processing structured document: {file.filename}")
+        print(f"🤖 Using direct Vertex AI analysis with embeddings")
+        
+        # Save uploaded file temporarily
+        file_id = str(uuid.uuid4())
+        temp_filename = f"{file_id}_{file.filename}"
+        temp_filepath = os.path.join(UPLOAD_FOLDER, temp_filename)
+        file.save(temp_filepath)
+        
+        # Process the file based on type
+        if file_ext == 'csv':
+            analysis_result = process_csv_with_direct_ai(temp_filepath, file.filename)
+        else:  # xlsx or xls
+            analysis_result = process_xlsx_with_direct_ai(temp_filepath, file.filename)
+        
+        # Clean up temporary file
+        if os.path.exists(temp_filepath):
+            os.remove(temp_filepath)
+        
+        return jsonify({
+            "file_id": file_id,
+            "filename": file.filename,
+            "file_type": file_ext,
+            "processing_method": "direct_ai_upload",
+            **analysis_result
+        }), 200
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Structured Document Processing Error: {error_msg}")
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+def process_csv_with_direct_ai(filepath, filename):
+    """Process CSV file with direct AI upload and focus on empty cells adjacent to questions"""
+    try:
+        # Read CSV file
+        df = pd.read_csv(filepath)
+        
+        print(f"📊 CSV Analysis: {len(df)} rows, {len(df.columns)} columns")
+        
+        # Identify empty cells adjacent to questions/requirements
+        target_cells = identify_empty_answer_cells(df, "main")
+        
+        # Upload file directly to AI and get document analysis
+        document_context = analyze_document_with_direct_ai(filepath, filename, target_cells)
+        
+        # Generate responses for each target cell
+        filled_responses = generate_responses_for_target_cells(target_cells, document_context, df, "main")
+        
+        # Create processed version
+        processed_df = fill_target_cells_with_responses(df, filled_responses)
+        
+        # Save processed file
+        output_filename = f"processed_{uuid.uuid4().hex[:8]}_{filename}"
+        output_path = os.path.join(UPLOAD_FOLDER, output_filename)
+        processed_df.to_csv(output_path, index=False)
+        
+        return {
+            "total_rows": len(df),
+            "total_columns": len(df.columns),
+            "columns": df.columns.tolist(),
+            "sheets_analyzed": [{"sheet_name": "main", "rows": len(df), "columns": len(df.columns)}],
+            "target_cells_identified": len(target_cells),
+            "cells_filled": len(filled_responses),
+            "output_file": output_filename,
+            "cell_analysis": target_cells[:10],
+            "responses": filled_responses[:10]
+        }
+        
+    except Exception as e:
+        raise Exception(f"CSV processing error: {str(e)}")
+
+def process_xlsx_with_direct_ai(filepath, filename):
+    """Process XLSX file with multiple sheets using direct AI analysis"""
+    try:
+        # Read all sheets
+        excel_file = pd.ExcelFile(filepath)
+        sheet_names = excel_file.sheet_names
+        
+        print(f"📊 XLSX Analysis: {len(sheet_names)} sheets")
+        
+        analysis_result = {
+            "total_sheets": len(sheet_names),
+            "sheets_analyzed": []
+        }
+        
+        all_target_cells = []
+        all_responses = []
+        
+        # Upload file directly to AI and get document analysis
+        document_context = analyze_document_with_direct_ai(filepath, filename, [])
+        
+        # Process each sheet
+        for sheet_name in sheet_names:
+            df = pd.read_excel(filepath, sheet_name=sheet_name)
+            
+            sheet_info = {
+                "sheet_name": sheet_name,
+                "rows": len(df),
+                "columns": len(df.columns),
+                "column_names": df.columns.tolist()
+            }
+            analysis_result["sheets_analyzed"].append(sheet_info)
+            
+            # Identify empty cells adjacent to questions
+            target_cells = identify_empty_answer_cells(df, sheet_name)
+            all_target_cells.extend(target_cells)
+            
+            # Generate responses for this sheet
+            sheet_responses = generate_responses_for_target_cells(target_cells, document_context, df, sheet_name)
+            all_responses.extend(sheet_responses)
+        
+        # Save processed file with all sheets
+        output_filename = f"processed_{uuid.uuid4().hex[:8]}_{filename}"
+        output_path = os.path.join(UPLOAD_FOLDER, output_filename)
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            for sheet_name in sheet_names:
+                df = pd.read_excel(filepath, sheet_name=sheet_name)
+                
+                # Apply responses to this sheet
+                sheet_responses = [r for r in all_responses if r.get('sheet_name') == sheet_name]
+                processed_df = fill_target_cells_with_responses(df, sheet_responses)
+                
+                processed_df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        analysis_result.update({
+            "target_cells_identified": len(all_target_cells),
+            "cells_filled": len(all_responses),
+            "output_file": output_filename,
+            "cell_analysis": all_target_cells[:10],
+            "responses": all_responses[:10]
+        })
+        
+        return analysis_result
+        
+    except Exception as e:
+        raise Exception(f"XLSX processing error: {str(e)}")
+
+def identify_empty_answer_cells(df, sheet_name):
+    """
+    Focus on empty cells that are adjacent to questions/requirements.
+    Look for empty cells next to questions based on column headings.
+    """
+    target_cells = []
+    
+    # Question patterns to identify question cells
+    question_patterns = [
+        r'\?$',  # Ends with question mark
+        r'^\s*(?:what|how|when|where|why|which|who|describe|explain|provide|list)',
+        r'(?:requirement|required|needed|must|should|shall)',
+        r'(?:fill\s+in|complete|answer|respond|provide\s+details)',
+        r'(?:TBD|TBC|TODO|PENDING)',
+    ]
+    
+    # Iterate through each cell
+    for row_idx, row in df.iterrows():
+        for col_idx, cell_value in enumerate(row):
+            cell_str = str(cell_value).strip() if not pd.isna(cell_value) else ""
+            
+            # Check if this cell contains a question/requirement
+            is_question = any(re.search(pattern, cell_str.lower()) for pattern in question_patterns) if cell_str else False
+            
+            if is_question:
+                # Look for empty cells adjacent to this question cell
+                # Check right cell (same row, next column)
+                if col_idx + 1 < len(df.columns):
+                    next_cell_value = df.iloc[row_idx, col_idx + 1]
+                    if pd.isna(next_cell_value) or str(next_cell_value).strip() == "":
+                        # This is an empty cell next to a question - target for answering
+                        column_header = df.columns[col_idx + 1] if col_idx + 1 < len(df.columns) else f"Column_{col_idx + 1}"
+                        
+                        target_cells.append({
+                            "sheet_name": sheet_name,
+                            "target_row": row_idx,
+                            "target_column": col_idx + 1,
+                            "target_column_name": column_header,
+                            "question_row": row_idx,
+                            "question_column": col_idx,
+                            "question_content": cell_str,
+                            "context": {
+                                "column_header": column_header,
+                                "row_context": get_row_context(df, row_idx),
+                                "question_type": classify_question_type(cell_str)
+                            }
+                        })
+                
+                # Also check cells below the question if they're in an "answer" column
+                column_name = df.columns[col_idx].lower() if col_idx < len(df.columns) else ""
+                if any(word in column_name for word in ["question", "requirement"]):
+                    # Look for answer column nearby
+                    for check_col in range(col_idx + 1, min(col_idx + 3, len(df.columns))):
+                        check_col_name = df.columns[check_col].lower()
+                        if any(word in check_col_name for word in ["answer", "response", "value", "detail"]):
+                            check_cell_value = df.iloc[row_idx, check_col]
+                            if pd.isna(check_cell_value) or str(check_cell_value).strip() == "":
+                                target_cells.append({
+                                    "sheet_name": sheet_name,
+                                    "target_row": row_idx,
+                                    "target_column": check_col,
+                                    "target_column_name": df.columns[check_col],
+                                    "question_row": row_idx,
+                                    "question_column": col_idx,
+                                    "question_content": cell_str,
+                                    "context": {
+                                        "column_header": df.columns[check_col],
+                                        "row_context": get_row_context(df, row_idx),
+                                        "question_type": classify_question_type(cell_str)
+                                    }
+                                })
+    
+    print(f"🎯 Found {len(target_cells)} empty cells adjacent to questions in {sheet_name}")
+    return target_cells
+
+def get_row_context(df, row_idx):
+    """Get context from the entire row"""
+    row_context = []
+    row_data = df.iloc[row_idx]
+    
+    for col_idx, value in enumerate(row_data):
+        if not pd.isna(value) and str(value).strip():
+            col_name = df.columns[col_idx] if col_idx < len(df.columns) else f"Column_{col_idx}"
+            row_context.append(f"{col_name}: {str(value)[:100]}")
+    
+    return " | ".join(row_context)
+
+def classify_question_type(content):
+    """Classify the type of question for better response generation"""
+    content_lower = content.lower()
+    
+    if any(word in content_lower for word in ["what", "describe", "explain"]):
+        return "descriptive"
+    elif any(word in content_lower for word in ["how", "process", "procedure"]):
+        return "procedural"
+    elif any(word in content_lower for word in ["when", "date", "time"]):
+        return "temporal"
+    elif any(word in content_lower for word in ["where", "location"]):
+        return "locational"
+    elif any(word in content_lower for word in ["why", "reason"]):
+        return "causal"
+    elif any(word in content_lower for word in ["requirement", "must", "shall", "required"]):
+        return "requirement"
+    elif content_lower.endswith("?"):
+        return "direct_question"
+    else:
+        return "general"
+
+def analyze_document_with_direct_ai(filepath, filename, target_cells):
+    """
+    Upload document directly to Vertex AI and get comprehensive analysis
+    using embeddings and AI understanding
+    """
+    try:
+        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+        import pandas as pd
+        
+        print(f"🤖 Processing {filename} for Vertex AI analysis...")
+        
+        # Determine file extension
+        file_ext = filename.lower().split('.')[-1] if '.' in filename else ''
+        
+        # For XLSX/XLS files, convert to text format since Vertex AI doesn't support these MIME types
+        if file_ext in ['xlsx', 'xls']:
+            print(f"📊 Converting {file_ext.upper()} to text format for AI analysis...")
+            
+            # Read Excel file and convert all sheets to text
+            excel_file = pd.ExcelFile(filepath)
+            text_content = f"EXCEL FILE: {filename}\n{'='*50}\n\n"
+            
+            for sheet_name in excel_file.sheet_names:
+                df = pd.read_excel(filepath, sheet_name=sheet_name)
+                text_content += f"SHEET: {sheet_name}\n{'-'*30}\n"
+                text_content += f"Columns: {', '.join(df.columns.tolist())}\n\n"
+                
+                # Convert DataFrame to readable text format
+                for idx, row in df.iterrows():
+                    row_text = []
+                    for col_name, value in row.items():
+                        if pd.notna(value) and str(value).strip():
+                            row_text.append(f"{col_name}: {value}")
+                    if row_text:
+                        text_content += f"Row {idx + 1}: {' | '.join(row_text)}\n"
+                
+                text_content += "\n\n"
+            
+            # Create text part for AI analysis
+            file_part = Part.from_text(text_content)
+            
+        elif file_ext == 'csv':
+            # For CSV files, we can upload directly
+            with open(filepath, "rb") as f:
+                file_data = f.read()
+            file_part = Part.from_data(data=file_data, mime_type='text/csv')
+            
+        else:
+            # For other file types, try direct upload
+            with open(filepath, "rb") as f:
+                file_data = f.read()
+            mime_type_map = {
+                'txt': 'text/plain',
+                'pdf': 'application/pdf',
+                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            }
+            mime_type = mime_type_map.get(file_ext, 'application/octet-stream')
+            file_part = Part.from_data(data=file_data, mime_type=mime_type)
+        
+        # Create comprehensive analysis prompt
+        analysis_prompt = f"""
+Analyze this {file_ext.upper()} document comprehensively. This document contains questions, requirements, or forms that need to be filled out.
+
+Please provide:
+
+1. DOCUMENT STRUCTURE ANALYSIS:
+   - Overview of the document's purpose and content
+   - Key sections or sheets identified
+   - Types of questions or requirements present
+
+2. CONTENT UNDERSTANDING:
+   - Main topics and themes covered
+   - Important information that could be used to answer questions
+   - Key data points, requirements, or specifications mentioned
+
+3. CONTEXTUAL INFORMATION:
+   - Business context or domain this document relates to
+   - Any specific terminology or concepts used
+   - Relationships between different sections
+
+4. ANSWERABLE CONTENT:
+   - What types of questions this document could help answer
+   - Key facts, figures, procedures, or requirements that are explicitly stated
+   - Any implicit information that could be inferred
+
+Focus on extracting factual information that could be used to answer questions or fill in requirements found in forms or questionnaires.
+"""
+        
+        model = GenerativeModel("gemini-2.0-flash")
+        
+        # Generate comprehensive document analysis
+        response = model.generate_content(
+            [file_part, Part.from_text(analysis_prompt)],
+            generation_config={
+                "max_output_tokens": 8192,
+                "temperature": 0.3,  # Lower temperature for more factual analysis
+                "top_p": 0.95,
+            },
+            safety_settings=[
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+            ],
+            stream=False
+        )
+        
+        document_analysis = response.text.strip()
+        print(f"✅ Document analysis completed: {len(document_analysis)} characters")
+        
+        return {
+            "filename": filename,
+            "analysis": document_analysis,
+            "target_cells_context": len(target_cells),
+            "processing_method": "direct_vertex_ai_upload"
+        }
+        
+    except Exception as e:
+        print(f"❌ Direct AI analysis error: {str(e)}")
+        return {
+            "filename": filename,
+            "analysis": f"Error analyzing document: {str(e)}",
+            "target_cells_context": len(target_cells),
+            "processing_method": "error"
+        }
+
+def generate_responses_for_target_cells(target_cells, document_context, df, sheet_name):
+    """
+    Generate AI responses for each target cell using the document context
+    """
+    filled_responses = []
+    
+    for cell in target_cells:
+        try:
+            from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+            
+            # Create specific query for this cell
+            question_content = cell["question_content"]
+            column_header = cell["target_column_name"]
+            row_context = cell["context"]["row_context"]
+            question_type = cell["context"]["question_type"]
+            
+            # Build contextual prompt
+            prompt = f"""
+Based on the document analysis provided below, please answer the specific question.
+
+DOCUMENT CONTEXT:
+{document_context['analysis']}
+
+SPECIFIC QUESTION DETAILS:
+- Question: {question_content}
+- Expected Answer Column: {column_header}
+- Row Context: {row_context}
+- Question Type: {question_type}
+- Sheet: {sheet_name}
+
+INSTRUCTION:
+Please provide a specific, concise answer to fill in the empty cell in the "{column_header}" column for this question. 
+Base your answer ONLY on the information available in the document analysis above.
+If the document doesn't contain relevant information, respond with "Information not available in document".
+
+Answer:
+"""
+            
+            model = GenerativeModel("gemini-2.0-flash")
+            
+            response = model.generate_content(
+                [Part.from_text(prompt)],
+                generation_config={
+                    "max_output_tokens": 1000,  # Shorter responses for cell content
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                },
+                safety_settings=[
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                        threshold=SafetySetting.HarmBlockThreshold.OFF
+                    ),
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                        threshold=SafetySetting.HarmBlockThreshold.OFF
+                    ),
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                        threshold=SafetySetting.HarmBlockThreshold.OFF
+                    ),
+                    SafetySetting(
+                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                        threshold=SafetySetting.HarmBlockThreshold.OFF
+                    ),
+                ],
+                stream=False
+            )
+            
+            ai_answer = response.text.strip()
+            
+            filled_responses.append({
+                "sheet_name": sheet_name,
+                "target_row": cell["target_row"],
+                "target_column": cell["target_column"],
+                "target_column_name": column_header,
+                "question_content": question_content,
+                "ai_response": ai_answer,
+                "question_type": question_type,
+                "row_context": row_context
+            })
+            
+            print(f"✅ Generated response for {sheet_name} [{cell['target_row']},{cell['target_column']}]: {ai_answer[:50]}...")
+            
+        except Exception as e:
+            print(f"❌ Error generating response for cell [{cell['target_row']},{cell['target_column']}]: {str(e)}")
+            filled_responses.append({
+                "sheet_name": sheet_name,
+                "target_row": cell["target_row"],
+                "target_column": cell["target_column"],
+                "target_column_name": cell["target_column_name"],
+                "question_content": cell["question_content"],
+                "ai_response": f"Error: {str(e)}",
+                "error": True
+            })
+    
+    return filled_responses
+
+def fill_target_cells_with_responses(df, responses):
+    """
+    Fill the target cells in DataFrame with AI-generated responses
+    """
+    processed_df = df.copy()
+    
+    for response in responses:
+        if "error" in response and response["error"]:
+            continue
+            
+        row_idx = response["target_row"]
+        col_idx = response["target_column"]
+        
+        if row_idx < len(processed_df) and col_idx < len(processed_df.columns):
+            ai_response = response["ai_response"]
+            # Limit response length for readability
+            if len(ai_response) > 500:
+                ai_response = ai_response[:497] + "..."
+            processed_df.iloc[row_idx, col_idx] = ai_response
+            
+    return processed_df
+
+# All old functions have been replaced with new AI-based direct upload functions
+
+@app.route("/api/v2/download-processed-document/<filename>", methods=["GET", "OPTIONS"])
+def download_processed_document(filename):
+    """Download the processed document"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        file_path = os.path.join(UPLOAD_FOLDER, filename)
+        if not os.path.exists(file_path):
+            return jsonify({"error": "File not found"}), 404
+        
+        # Return file for download
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/octet-stream'
+        )
+        
+    except Exception as e:
+        print(f"❌ Download error: {str(e)}")
+        return jsonify({"error": "Download failed"}), 500
+
+
+@app.route("/api/prototype/sheet-analyzer", methods=["POST", "OPTIONS"])
+def prototype_sheet_analyzer():
+    """
+    Prototype endpoint for analyzing Excel/CSV files sheet by sheet.
+    Identifies questions, answer types, and column mappings per sheet.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "Vertex AI service is not available"}), 503
+    
+    try:
+        # Handle file upload
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+        
+        # Get file extension
+        filename = file.filename.lower()
+        file_ext = filename.split('.')[-1]
+        
+        if file_ext not in ['csv', 'xlsx', 'xls']:
+            return jsonify({"error": "Only CSV and Excel files are supported"}), 400
+        
+        # Save temporary file
+        temp_filename = f"temp_{uuid.uuid4()}.{file_ext}"
+        temp_filepath = os.path.join("uploads", temp_filename)
+        os.makedirs("uploads", exist_ok=True)
+        file.save(temp_filepath)
+        
+        try:
+            # Process based on file type
+            if file_ext == 'csv':
+                result = analyze_csv_for_prototype(temp_filepath, file.filename)
+            else:  # xlsx or xls
+                result = analyze_excel_for_prototype(temp_filepath, file.filename)
+            
+            return jsonify(result)
+            
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_filepath):
+                os.remove(temp_filepath)
+                
+    except Exception as e:
+        print(f"❌ Prototype analyzer error: {str(e)}")
+        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
+
+
+def analyze_csv_for_prototype(filepath, filename):
+    """Analyze CSV file for prototype - identify questions and answer types"""
+    import pandas as pd
+    
+    try:
+        df = pd.read_csv(filepath)
+        
+        # Analyze the single sheet
+        sheet_analysis = analyze_sheet_for_questions(df, "CSV_Sheet", filepath, filename)
+        
+        return {
+            "filename": filename,
+            "file_type": "csv",
+            "total_sheets": 1,
+            "sheets": [sheet_analysis]
+        }
+        
+    except Exception as e:
+        return {
+            "filename": filename,
+            "file_type": "csv",
+            "error": f"CSV analysis failed: {str(e)}"
+        }
+
+
+def analyze_excel_for_prototype(filepath, filename):
+    """Analyze Excel file for prototype - process each sheet separately"""
+    import pandas as pd
+    
+    try:
+        excel_file = pd.ExcelFile(filepath)
+        sheet_names = excel_file.sheet_names
+        
+        sheets_analysis = []
+        
+        for sheet_name in sheet_names:
+            try:
+                df = pd.read_excel(filepath, sheet_name=sheet_name)
+                sheet_analysis = analyze_sheet_for_questions(df, sheet_name, filepath, filename)
+                sheets_analysis.append(sheet_analysis)
+            except Exception as e:
+                sheets_analysis.append({
+                    "sheet_name": sheet_name,
+                    "error": f"Sheet analysis failed: {str(e)}"
+                })
+        
+        return {
+            "filename": filename,
+            "file_type": "excel",
+            "total_sheets": len(sheet_names),
+            "sheets": sheets_analysis
+        }
+        
+    except Exception as e:
+        return {
+            "filename": filename,
+            "file_type": "excel",
+            "error": f"Excel analysis failed: {str(e)}"
+        }
+
+
+def analyze_sheet_for_questions(df, sheet_name, filepath, filename):
+    """Analyze a single sheet/dataframe to identify questions and answer types"""
+    from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+    
+    try:
+        # Convert dataframe to text representation for LLM analysis
+        sheet_text = f"Sheet Name: {sheet_name}\n\n"
+        sheet_text += f"Headers: {list(df.columns)}\n\n"
+        sheet_text += "Sample Data (first 10 rows):\n"
+        sheet_text += df.head(10).to_string(index=True)
+        
+        # Create analysis prompt
+        analysis_prompt = f"""
+Analyze this spreadsheet sheet and determine:
+
+1. QUESTION DETECTION:
+   - Does this sheet contain questions that need answers?
+   - If yes, what are the specific questions?
+
+2. QUESTION EXTRACTION:
+   - List all questions found in the sheet
+   - Identify which columns/headers represent questions
+   - Extract the exact question text
+
+3. ANSWER TYPE CLASSIFICATION:
+   - For each question, determine the expected answer type:
+     * YES_NO: Yes/No or True/False responses
+     * MULTIPLE_CHOICE: Selection from predefined options
+     * SHORT_TEXT: Brief text responses (1-2 words)
+     * LONG_TEXT: Detailed text responses (sentences/paragraphs)
+     * NUMBER: Numeric values
+     * DATE: Date values
+     * COMPLETED_STATUS: Completed/Not Completed, Done/Pending, etc.
+     * RATING: Scale ratings (1-5, 1-10, etc.)
+     * OTHER: Any other specific type
+
+4. COLUMN MAPPING:
+   - Which columns contain questions vs answers
+   - Which columns are related to each question
+   - Multiple answer columns for single questions (if any)
+
+Sheet Data:
+{sheet_text}
+
+Please respond in JSON format:
+{{
+    "has_questions": boolean,
+    "total_questions": number,
+    "questions": [
+        {{
+            "question_text": "exact question text",
+            "question_column": "column name containing question",
+            "answer_columns": ["column name(s) for answers"],
+            "answer_type": "answer type from list above",
+            "is_multiple_answers": boolean,
+            "sample_answers": ["sample answer values if available"]
+        }}
+    ],
+    "sheet_purpose": "brief description of what this sheet is for"
+}}
+"""
+
+        # Use Vertex AI to analyze
+        model = GenerativeModel("gemini-1.5-flash-002")
+        
+        response = model.generate_content(
+            [Part.from_text(analysis_prompt)],
+            generation_config={
+                "temperature": 0.1,
+                "top_p": 0.8,
+                "max_output_tokens": 2048,
+            },
+            safety_settings=[
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+                SafetySetting(
+                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                ),
+            ],
+            stream=False
+        )
+        
+        # Parse AI response
+        ai_analysis = response.text.strip()
+        
+        # Try to extract JSON from AI response
+        try:
+            import json
+            import re
+            
+            # Find JSON in the response
+            json_match = re.search(r'\{.*\}', ai_analysis, re.DOTALL)
+            if json_match:
+                analysis_json = json.loads(json_match.group())
+            else:
+                # Fallback if no JSON found
+                analysis_json = {
+                    "has_questions": False,
+                    "total_questions": 0,
+                    "questions": [],
+                    "sheet_purpose": "Analysis failed - no structured response"
+                }
+        except:
+            analysis_json = {
+                "has_questions": False,
+                "total_questions": 0,
+                "questions": [],
+                "sheet_purpose": "JSON parsing failed"
+            }
+        
+        # Add sheet metadata
+        result = {
+            "sheet_name": sheet_name,
+            "total_columns": len(df.columns),
+            "total_rows": len(df),
+            "columns": list(df.columns),
+            "analysis": analysis_json,
+            "raw_ai_response": ai_analysis
+        }
+        
+        return result
+        
+    except Exception as e:
+        return {
+            "sheet_name": sheet_name,
+            "error": f"Sheet analysis failed: {str(e)}",
+            "total_columns": len(df.columns) if 'df' in locals() else 0,
+            "total_rows": len(df) if 'df' in locals() else 0
+        }
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8002))
     debug_mode = os.environ.get("DEBUG", "0") == "1"
     
-    print(f"🚀 CareAI API v2.3.0 - Enhanced with Multimodal Question Extraction")
-    print(f"📋 Features: FileId management, Auto status sync, Multimodal question extraction, Direct file upload")
+    print(f"🚀 CareAI API v2.3.1 - Enhanced with Prototype Sheet Analyzer")
+    print(f"📋 Features: FileId management, Auto status sync, Multimodal question extraction, Direct file upload, Sheet Analyzer")
     print(f"🎯 Supported: Documents (PDF, DOCX, TXT, CSV, JSON, XLSX) + Images (PNG, JPG, GIF, WEBP)")
+    print(f"🔬 New: /api/prototype/sheet-analyzer - Analyze Excel/CSV sheets for questions and answer types")
     
     if debug_mode:
         print(f"🔍 Starting Flask development server on port {port}")
