@@ -8,7 +8,7 @@ import threading
 import traceback
 import requests
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -2923,7 +2923,7 @@ def chat_with_doc():
                 
                 if score >= 0.2:  # Similarity threshold
                     retrieved_docs.append({
-                        "content": chunk_data["content"], 
+                        "content": chunk_data.get("content", chunk_data.get("text", "No content available")), 
                         "score": float(score),
                         "filename": file_data.get("filename", "Unknown"),
                         "file_id": file_data.get("file_id", file_doc.id),
@@ -3093,7 +3093,7 @@ def chat_with_doc():
                             
                             if score >= 0.2:  # Similarity threshold
                                 retrieved_docs.append({
-                                    "content": chunk_data["content"], 
+                                    "content": chunk_data.get("content", chunk_data.get("text", "No content available")), 
                                     "score": float(score),
                                     "filename": file_data.get("filename", "Unknown"),
                                     "file_id": file_data.get("file_id", file_doc.id),
@@ -3714,7 +3714,7 @@ def chat_with_rfp_documents():
                 
                 if score >= 0.2:  # Similarity threshold
                     retrieved_docs.append({
-                        "content": chunk_data["content"], 
+                        "content": chunk_data.get("content", chunk_data.get("text", "No content available")), 
                         "score": float(score),
                         "filename": file_data.get("filename", "Unknown"),
                         "file_id": file_data.get("file_id", file_doc.id),
@@ -6712,7 +6712,7 @@ def generate_questionnaire_response():
         
         # Use Vertex AI Gemini with very low temperature
         from vertexai.generative_models import GenerativeModel, GenerationConfig
-        model = GenerativeModel("gemini-1.5-flash")
+        model = GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(
             prompt,
             generation_config=GenerationConfig(
@@ -6732,7 +6732,7 @@ def generate_questionnaire_response():
             'confidence': 0.9,
             'knowledgeSource': knowledge_base_option,
             'processingTime': round(time.time() - start_time, 2),
-            'timestamp': datetime.utcnow().isoformat() + 'Z'
+            'timestamp': datetime.now(timezone.utc).isoformat() + 'Z'
         })
         
     except Exception as e:
@@ -7726,7 +7726,7 @@ Please respond in JSON format:
 """
 
         # Use Vertex AI to analyze
-        model = GenerativeModel("gemini-1.5-flash-002")
+        model = GenerativeModel("gemini-2.0-flash")
         
         response = model.generate_content(
             [Part.from_text(analysis_prompt)],
