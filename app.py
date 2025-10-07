@@ -1210,7 +1210,92 @@ def delete_collection(collection_ref, batch_size):
     
     return deleted_count
 
-def generate_answer_with_gcp(query, context_chunks):
+def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option="global"):
+    """Get context from knowledge base based on option (global or specific)"""
+    try:
+        # Get query embedding
+        query_embedding = np.array(embed_query(query))
+        retrieved_docs = []
+        
+        if knowledge_base_option == "global":
+            # Search organization-level documents (global knowledge base)
+            org_files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+            org_files = org_files_ref.stream()
+            
+            # Process each organization file
+            for file_doc in org_files:
+                file_data = file_doc.to_dict()
+                
+                # Get chunks for this file
+                chunks_ref = file_doc.reference.collection("chunks")
+                chunks = chunks_ref.stream()
+                
+                # Process each chunk
+                for chunk_doc in chunks:
+                    chunk_data = chunk_doc.to_dict()
+                    
+                    # Convert to numpy array
+                    chunk_embedding = np.array(chunk_data["embedding"])
+                    
+                    # Calculate cosine similarity
+                    score = np.dot(query_embedding, chunk_embedding) / (
+                        np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
+                    )
+                    
+                    if score >= 0.2:  # Similarity threshold
+                        chunk_content = chunk_data.get("content") or chunk_data.get("text", "")
+                        retrieved_docs.append({
+                            "content": chunk_content,
+                            "score": float(score)
+                        })
+        else:
+            # Use specific project support documents
+            project_files_ref = (db.collection("org_project_support_embeddings")
+                               .document(f"org-{org_id}")
+                               .collection("projects")
+                               .document(f"project-{project_id}")
+                               .collection("files"))
+            
+            files = project_files_ref.stream()
+            
+            # Process each file
+            for file_doc in files:
+                file_data = file_doc.to_dict()
+                
+                # Get chunks for this file
+                chunks_ref = file_doc.reference.collection("chunks")
+                chunks = chunks_ref.stream()
+                
+                # Process each chunk
+                for chunk_doc in chunks:
+                    chunk_data = chunk_doc.to_dict()
+                    
+                    # Convert to numpy array
+                    chunk_embedding = np.array(chunk_data["embedding"])
+                    
+                    # Calculate cosine similarity
+                    score = np.dot(query_embedding, chunk_embedding) / (
+                        np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
+                    )
+                    
+                    if score >= 0.2:  # Similarity threshold
+                        chunk_content = chunk_data.get("content") or chunk_data.get("text", "")
+                        retrieved_docs.append({
+                            "content": chunk_content,
+                            "score": float(score)
+                        })
+        
+        # Get top chunks by similarity and combine content
+        top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:3]
+        context_text = "\n\n".join([doc["content"] for doc in top_chunks])
+        
+        return context_text if context_text.strip() else "No specific context available."
+        
+    except Exception as e:
+        print(f"❌ Error getting knowledge base context: {str(e)}")
+        return "No specific context available."
+
+def generate_answer_with_gcp(query, context_chunks, conversation_history=""):
     """Generate answer using Google's Vertex AI"""
     if not VERTEX_AVAILABLE:
         return "Sorry, the AI generation service is currently unavailable."
@@ -1219,14 +1304,17 @@ def generate_answer_with_gcp(query, context_chunks):
         context_text = "\n\n".join(context_chunks)
         
         prompt = f"""
-You are an intelligent assistant. Below is a set of information retrieved from various documents.
+You are an intelligent assistant tasked with generating an accurate and comprehensive answer using only the information provided below.
+Your response must rely solely on the conversation history and the retrieved context, without adding external knowledge or assumptions.
 
-Context:
+Conversation History:
+{conversation_history}
+
+Retrieved Context:
 {context_text}
 
-Question: {query}
-
-Answer (based ONLY on the above context):
+Question:
+{query}
 """
 
         model = GenerativeModel("gemini-2.0-flash")
@@ -2872,6 +2960,7 @@ def chat_with_doc():
         query = data.get("query")
         org_id = data.get("orgId")
         file_ids = data.get("fileIds", [])  # Optional: search only specific files
+        conversation_history = data.get("conversationHistory", "")
         
         if not query or not org_id:
             return jsonify({"error": "Query and orgId are required."}), 400
@@ -3183,7 +3272,7 @@ def chat_with_doc():
 
         # Generate answer using combined context
         context_chunks = [doc["content"] for doc in top_chunks]
-        answer = generate_answer_with_gcp(query, context_chunks)
+        answer = generate_answer_with_gcp(query, context_chunks, conversation_history)
         
         # Get unique source files with enhanced information
         source_files = []
@@ -3322,7 +3411,7 @@ def chat_with_ragie():
         print(f"🎯 Generating response with {len(context_chunks)} context chunks from Ragie")
 
         # Step 3: Generate response using local GPT/Vertex AI
-        ai_response = generate_answer_with_gcp(query, context_chunks)
+        ai_response = generate_answer_with_gcp(query, context_chunks, "")
 
         # Step 4: Prepare response
         response_data = {
@@ -3740,7 +3829,7 @@ def chat_with_rfp_documents():
 
         # Generate answer
         context_chunks = [doc["content"] for doc in top_chunks]
-        answer = generate_answer_with_gcp(query, context_chunks)
+        answer = generate_answer_with_gcp(query, context_chunks, "")
         
         # Get unique source files
         source_files = []
@@ -6518,7 +6607,7 @@ def generate_response_v2():
 
             # Generate answer
             context_chunks = [doc["content"] for doc in top_chunks]
-            answer = generate_answer_with_gcp(query, context_chunks)
+            answer = generate_answer_with_gcp(query, context_chunks, "")
             
             # Get unique source files
             source_files = []
@@ -6610,7 +6699,7 @@ def generate_response_v2():
 
             # Generate answer
             context_chunks = [doc["content"] for doc in top_chunks]
-            answer = generate_answer_with_gcp(query, context_chunks)
+            answer = generate_answer_with_gcp(query, context_chunks, "")
             
             # Get unique source files
             source_files = []
@@ -6695,20 +6784,35 @@ def generate_questionnaire_response():
             knowledge_context = "No specific context available."
         
         # Generate response based on type with strict formatting
+        base_prompt = f"""You are assisting in responding to an RFP. You will be provided one question and the relevant document text that contains the information needed to answer it.
+
+Important Rules:
+• Only use the information provided in the relevant text.
+• Do not assume, invent, or include any external facts.
+• Maintain a professional and proposal-ready tone.
+• Follow the response format exactly as specified for each answer type.
+
+Relevant Text:
+{knowledge_context}
+
+Question: {question_text}
+
+"""
+
         if response_type == 'yes_no':
-            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nRespond with ONLY ONE WORD: either 'Yes' or 'No'. Nothing else."
+            prompt = base_prompt + "Respond with ONLY ONE WORD: either 'Yes' or 'No'. Nothing else."
         elif response_type == 'true_false':
-            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nRespond with ONLY ONE WORD: either 'True' or 'False'. Nothing else."
+            prompt = base_prompt + "Respond with ONLY ONE WORD: either 'True' or 'False'. Nothing else."
         elif response_type == 'single_choice' and choices:
-            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nAvailable options: {', '.join(choices)}\n\nRespond with ONLY the exact option text from the list above. Nothing else."
+            prompt = base_prompt + f"Available options: {', '.join(choices)}\n\nRespond with ONLY the exact option text from the list above. Nothing else."
         elif response_type == 'multi_choice' and choices:
-            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nAvailable options: {', '.join(choices)}\n\nRespond with ONLY the selected option names separated by commas. Example: 'Option1, Option3'. Nothing else."
+            prompt = base_prompt + f"Available options: {', '.join(choices)}\n\nRespond with ONLY the selected option names separated by commas. Example: 'Option1, Option3'. Nothing else."
         elif response_type == 'completed_incomplete':
-            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nRespond with ONLY ONE WORD: either 'Complete' or 'Incomplete'. Nothing else."
+            prompt = base_prompt + "Respond with ONLY ONE WORD: either 'Complete' or 'Incomplete'. Nothing else."
         elif response_type == 'long_answer':
-            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nProvide a comprehensive detailed answer with examples, background information, and specific details. Use multiple paragraphs if needed."
+            prompt = base_prompt + "Provide a comprehensive detailed answer with examples, background information, and specific details. Use multiple paragraphs if needed."
         else:  # short_answer or default
-            prompt = f"Based on: {knowledge_context}\n\nQuestion: {question_text}\n\nProvide a concise, professional answer in 1-2 sentences."
+            prompt = base_prompt + "Provide a concise, professional answer in 1-2 sentences."
         
         # Use Vertex AI Gemini with very low temperature
         from vertexai.generative_models import GenerativeModel, GenerationConfig
