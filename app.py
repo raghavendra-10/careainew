@@ -122,13 +122,52 @@ def get_cross_encoder_model():
         try:
             from sentence_transformers import CrossEncoder
             print("🔄 Loading cross-encoder model for reranking...")
-            _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2')
-            print("✅ Cross-encoder model loaded successfully")
+            
+            # Try to load the model with timeout and retry logic
+            try:
+                # Check for HF token to avoid rate limiting
+                import os
+                hf_token = os.getenv('HF_TOKEN') or os.getenv('HUGGINGFACE_TOKEN')
+                if hf_token:
+                    print("🔑 Using Hugging Face token to avoid rate limits")
+                else:
+                    print("⚠️ No HF_TOKEN found - may hit rate limits")
+                
+                # Try to load model with device handling
+                try:
+                    import torch
+                    device = "cpu"  # Force CPU to avoid tensor issues
+                    print(f"🔧 Loading cross-encoder on device: {device}")
+                    _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2', device=device)
+                except Exception as device_error:
+                    # Fallback without explicit device
+                    print(f"🔧 Device-specific loading failed: {device_error}")
+                    print("🔧 Loading cross-encoder with auto device detection")
+                    try:
+                        _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2')
+                    except Exception as fallback_error:
+                        print(f"🔧 Auto device loading failed: {fallback_error}")
+                        # Try with trust_remote_code for newer models
+                        _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2', trust_remote_code=True)
+                
+                print("✅ Cross-encoder model loaded successfully")
+            except Exception as download_error:
+                error_str = str(download_error)
+                if "429" in error_str or "rate limit" in error_str.lower():
+                    print("⚠️ Hugging Face rate limit hit - reranking temporarily disabled")
+                    print("💡 Fallback: Using hybrid search + similarity ranking instead")
+                elif "connection" in error_str.lower() or "timeout" in error_str.lower():
+                    print("⚠️ Network connection issue - reranking temporarily disabled")  
+                    print("💡 Fallback: Using hybrid search + similarity ranking instead")
+                else:
+                    print(f"⚠️ Error loading cross-encoder model: {error_str}")
+                return None
+                
         except ImportError:
             print("⚠️ sentence-transformers not available - reranking disabled")
             return None
         except Exception as e:
-            print(f"⚠️ Error loading cross-encoder model: {str(e)}")
+            print(f"⚠️ Error initializing cross-encoder: {str(e)}")
             return None
     return _cross_encoder_model
 
@@ -163,8 +202,19 @@ def rerank_documents(query, documents, top_k=5):
             truncated_content = content[:2000] if len(content) > 2000 else content
             pairs.append([query, truncated_content])
         
-        # Get cross-encoder scores
-        cross_encoder_scores = model.predict(pairs)
+        # Get cross-encoder scores with error handling
+        try:
+            cross_encoder_scores = model.predict(pairs)
+        except Exception as predict_error:
+            error_str = str(predict_error)
+            if "meta tensor" in error_str or "torch.nn.Module.to_empty" in error_str:
+                print("⚠️ PyTorch tensor loading issue - falling back to similarity ranking")
+            elif "cuda" in error_str.lower() or "device" in error_str.lower():
+                print("⚠️ Device/CUDA issue - falling back to similarity ranking")
+            else:
+                print(f"⚠️ Cross-encoder prediction error: {error_str}")
+            # Return similarity-ranked results as fallback
+            return sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
         
         # Update documents with new scores
         reranked_docs = []
