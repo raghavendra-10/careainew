@@ -109,6 +109,646 @@ def check_file_processing_dependencies():
     return supported, missing
 
 # ================================
+# RERANKING FUNCTIONALITY
+# ================================
+
+# Global variable to cache the cross-encoder model
+_cross_encoder_model = None
+
+def get_cross_encoder_model():
+    """Lazy load the cross-encoder model for reranking"""
+    global _cross_encoder_model
+    if _cross_encoder_model is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            print("🔄 Loading cross-encoder model for reranking...")
+            _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2')
+            print("✅ Cross-encoder model loaded successfully")
+        except ImportError:
+            print("⚠️ sentence-transformers not available - reranking disabled")
+            return None
+        except Exception as e:
+            print(f"⚠️ Error loading cross-encoder model: {str(e)}")
+            return None
+    return _cross_encoder_model
+
+def rerank_documents(query, documents, top_k=5):
+    """
+    Rerank documents using cross-encoder model
+    
+    Args:
+        query (str): The search query
+        documents (list): List of document dictionaries with 'content' and 'score' keys
+        top_k (int): Number of top documents to return after reranking
+    
+    Returns:
+        list: Reranked documents with updated scores
+    """
+    try:
+        model = get_cross_encoder_model()
+        if model is None:
+            print("⚠️ Cross-encoder model not available - falling back to similarity ranking")
+            return sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+        
+        if not documents:
+            return []
+        
+        print(f"🔄 Reranking {len(documents)} documents with cross-encoder...")
+        
+        # Prepare query-document pairs for cross-encoder
+        pairs = []
+        for doc in documents:
+            content = doc.get("content", "")
+            # Truncate content to avoid token limits (cross-encoder typically handles ~512 tokens)
+            truncated_content = content[:2000] if len(content) > 2000 else content
+            pairs.append([query, truncated_content])
+        
+        # Get cross-encoder scores
+        cross_encoder_scores = model.predict(pairs)
+        
+        # Update documents with new scores
+        reranked_docs = []
+        for i, doc in enumerate(documents):
+            doc_copy = doc.copy()
+            doc_copy["cross_encoder_score"] = float(cross_encoder_scores[i])
+            doc_copy["original_score"] = doc.get("score", 0)
+            reranked_docs.append(doc_copy)
+        
+        # Sort by cross-encoder score and return top_k
+        reranked_docs.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
+        top_reranked = reranked_docs[:top_k]
+        
+        print(f"✅ Reranking complete - returned top {len(top_reranked)} documents")
+        return top_reranked
+        
+    except Exception as e:
+        print(f"❌ Error during reranking: {str(e)}")
+        print("🔄 Falling back to similarity-based ranking...")
+        return sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+
+# ================================
+# HYBRID SEARCH (DENSE + SPARSE)
+# ================================
+
+# Global variables for BM25 models and text preprocessing
+_bm25_models = {}  # Cache BM25 models per organization/project
+_text_preprocessor = None
+
+def get_text_preprocessor():
+    """Initialize and cache text preprocessor"""
+    global _text_preprocessor
+    if _text_preprocessor is None:
+        try:
+            import nltk
+            from nltk.tokenize import word_tokenize
+            from nltk.corpus import stopwords
+            from nltk.stem import PorterStemmer
+            import string
+            import re
+            
+            # Download required NLTK data (only once) - handles Cloud Run deployment
+            print("🔄 Checking and downloading NLTK data...")
+            
+            # Download punkt_tab (newer requirement)
+            try:
+                nltk.data.find('tokenizers/punkt_tab')
+                print("✅ punkt_tab already available")
+            except LookupError:
+                try:
+                    print("📥 Downloading NLTK punkt_tab tokenizer...")
+                    nltk.download('punkt_tab', quiet=False)
+                    print("✅ punkt_tab downloaded successfully")
+                except Exception as e:
+                    print(f"⚠️ Failed to download punkt_tab: {e}")
+            
+            # Download punkt (fallback)
+            try:
+                nltk.data.find('tokenizers/punkt')
+                print("✅ punkt already available")
+            except LookupError:
+                try:
+                    print("📥 Downloading NLTK punkt tokenizer...")
+                    nltk.download('punkt', quiet=False)
+                    print("✅ punkt downloaded successfully")
+                except Exception as e:
+                    print(f"⚠️ Failed to download punkt: {e}")
+            
+            # Download stopwords
+            try:
+                nltk.data.find('corpora/stopwords')
+                print("✅ stopwords already available")
+            except LookupError:
+                try:
+                    print("📥 Downloading NLTK stopwords...")
+                    nltk.download('stopwords', quiet=False)
+                    print("✅ stopwords downloaded successfully")
+                except Exception as e:
+                    print(f"⚠️ Failed to download stopwords: {e}")
+            
+            try:
+                stemmer = PorterStemmer()
+            except:
+                stemmer = None
+                
+            try:
+                stop_words = set(stopwords.words('english'))
+            except:
+                # Fallback to basic English stopwords
+                stop_words = set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should', 'could', 'can', 'may', 'might', 'must', 'shall', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them'])
+            
+            def preprocess_text(text):
+                if not text or not isinstance(text, str):
+                    return []
+                
+                try:
+                    # Convert to lowercase and remove extra whitespace
+                    text = text.lower().strip()
+                    
+                    # Remove special characters but keep alphanumeric and spaces
+                    text = re.sub(r'[^\w\s]', ' ', text)
+                    
+                    # Try NLTK tokenization first
+                    try:
+                        tokens = word_tokenize(text)
+                    except:
+                        # Fallback to simple split if NLTK fails
+                        tokens = text.split()
+                    
+                    # Remove stopwords, punctuation, and stem
+                    processed_tokens = []
+                    for token in tokens:
+                        if (token not in stop_words and 
+                            token not in string.punctuation and 
+                            len(token) > 2 and
+                            token.isalpha()):
+                            if stemmer:
+                                try:
+                                    processed_tokens.append(stemmer.stem(token))
+                                except:
+                                    # If stemming fails, use original token
+                                    processed_tokens.append(token)
+                            else:
+                                # No stemmer available, use original token
+                                processed_tokens.append(token)
+                    
+                    return processed_tokens
+                    
+                except Exception as e:
+                    print(f"⚠️ Text preprocessing error: {e}")
+                    # Ultimate fallback - simple split
+                    return text.lower().split() if isinstance(text, str) else []
+            
+            _text_preprocessor = preprocess_text
+            print("✅ Text preprocessor initialized")
+            
+        except ImportError as e:
+            print(f"⚠️ NLTK not available: {e}")
+            # Fallback simple preprocessor
+            def simple_preprocess(text):
+                if not text or not isinstance(text, str):
+                    return []
+                return text.lower().split()
+            _text_preprocessor = simple_preprocess
+            
+    return _text_preprocessor
+
+def create_bm25_index(documents, index_key):
+    """
+    Create BM25 index for a set of documents
+    
+    Args:
+        documents (list): List of document dictionaries with 'content' field
+        index_key (str): Unique key for caching this index
+    
+    Returns:
+        BM25Okapi: Initialized BM25 model
+    """
+    global _bm25_models
+    
+    if index_key in _bm25_models:
+        return _bm25_models[index_key]
+    
+    try:
+        from rank_bm25 import BM25Okapi
+        
+        print(f"🔧 Creating BM25 index for {len(documents)} documents (key: {index_key})")
+        
+        preprocessor = get_text_preprocessor()
+        
+        # Preprocess documents
+        tokenized_docs = []
+        for doc in documents:
+            content = doc.get('content', '')
+            tokens = preprocessor(content)
+            tokenized_docs.append(tokens)
+        
+        # Create BM25 index
+        bm25 = BM25Okapi(tokenized_docs)
+        _bm25_models[index_key] = bm25
+        
+        print(f"✅ BM25 index created for {index_key}")
+        return bm25
+        
+    except ImportError:
+        print("⚠️ rank-bm25 not available - BM25 search disabled")
+        return None
+    except Exception as e:
+        print(f"❌ Error creating BM25 index: {str(e)}")
+        return None
+
+def bm25_search(query, documents, index_key, top_k=10):
+    """
+    Perform BM25 search on documents
+    
+    Args:
+        query (str): Search query
+        documents (list): List of document dictionaries
+        index_key (str): Unique key for BM25 index
+        top_k (int): Number of top results to return
+    
+    Returns:
+        list: Documents with BM25 scores
+    """
+    try:
+        bm25 = create_bm25_index(documents, index_key)
+        if bm25 is None:
+            return []
+        
+        preprocessor = get_text_preprocessor()
+        query_tokens = preprocessor(query)
+        
+        if not query_tokens:
+            return []
+        
+        # Get BM25 scores
+        scores = bm25.get_scores(query_tokens)
+        
+        # Combine documents with scores
+        scored_docs = []
+        for i, doc in enumerate(documents):
+            if i < len(scores):
+                doc_copy = doc.copy()
+                doc_copy['bm25_score'] = float(scores[i])
+                scored_docs.append(doc_copy)
+        
+        # Sort by BM25 score and return top_k
+        scored_docs.sort(key=lambda x: x['bm25_score'], reverse=True)
+        return scored_docs[:top_k]
+        
+    except Exception as e:
+        print(f"❌ Error in BM25 search: {str(e)}")
+        return []
+
+def hybrid_search(query, documents, index_key, top_k=10, dense_weight=0.7, sparse_weight=0.3):
+    """
+    Perform hybrid search combining dense (semantic) and sparse (BM25) results
+    
+    Args:
+        query (str): Search query
+        documents (list): List of document dictionaries with 'content' and 'score' (semantic)
+        index_key (str): Unique key for BM25 indexing
+        top_k (int): Number of top results to return
+        dense_weight (float): Weight for dense/semantic scores (0.0-1.0)
+        sparse_weight (float): Weight for sparse/BM25 scores (0.0-1.0)
+    
+    Returns:
+        list: Hybrid ranked documents with combined scores
+    """
+    try:
+        print(f"🔄 Performing hybrid search: dense({dense_weight}) + sparse({sparse_weight})")
+        
+        # Step 1: Get BM25 results
+        bm25_results = bm25_search(query, documents, index_key, top_k=min(50, len(documents)))
+        
+        # Create lookup for BM25 scores
+        bm25_lookup = {}
+        for doc in bm25_results:
+            # Use content hash as key for matching
+            content_key = hash(doc.get('content', ''))
+            bm25_lookup[content_key] = doc.get('bm25_score', 0.0)
+        
+        # Step 2: Normalize scores to 0-1 range
+        if documents:
+            # Normalize semantic scores
+            semantic_scores = [doc.get('score', 0.0) for doc in documents]
+            if semantic_scores:
+                max_semantic = max(semantic_scores)
+                min_semantic = min(semantic_scores)
+                semantic_range = max_semantic - min_semantic if max_semantic > min_semantic else 1.0
+        
+        if bm25_results:
+            # Normalize BM25 scores
+            bm25_scores = [doc.get('bm25_score', 0.0) for doc in bm25_results]
+            max_bm25 = max(bm25_scores) if bm25_scores else 1.0
+            min_bm25 = min(bm25_scores) if bm25_scores else 0.0
+            bm25_range = max_bm25 - min_bm25 if max_bm25 > min_bm25 else 1.0
+        else:
+            max_bm25 = min_bm25 = bm25_range = 1.0
+        
+        # Step 3: Combine scores
+        hybrid_docs = []
+        for doc in documents:
+            content_key = hash(doc.get('content', ''))
+            
+            # Normalize semantic score
+            semantic_score = doc.get('score', 0.0)
+            normalized_semantic = (semantic_score - min_semantic) / semantic_range if 'semantic_range' in locals() else semantic_score
+            
+            # Get and normalize BM25 score
+            bm25_score = bm25_lookup.get(content_key, 0.0)
+            normalized_bm25 = (bm25_score - min_bm25) / bm25_range if bm25_range > 0 else 0.0
+            
+            # Calculate hybrid score
+            hybrid_score = (dense_weight * normalized_semantic) + (sparse_weight * normalized_bm25)
+            
+            # Create new document with hybrid score
+            hybrid_doc = doc.copy()
+            hybrid_doc['hybrid_score'] = float(hybrid_score)
+            hybrid_doc['semantic_score'] = float(semantic_score)
+            hybrid_doc['bm25_score'] = float(bm25_score)
+            hybrid_doc['normalized_semantic'] = float(normalized_semantic)
+            hybrid_doc['normalized_bm25'] = float(normalized_bm25)
+            
+            hybrid_docs.append(hybrid_doc)
+        
+        # Step 4: Sort by hybrid score and return top_k
+        hybrid_docs.sort(key=lambda x: x['hybrid_score'], reverse=True)
+        top_hybrid = hybrid_docs[:top_k]
+        
+        print(f"✅ Hybrid search complete - returned {len(top_hybrid)} results")
+        return top_hybrid
+        
+    except Exception as e:
+        print(f"❌ Error in hybrid search: {str(e)}")
+        print("🔄 Falling back to semantic search only...")
+        return sorted(documents, key=lambda x: x.get('score', 0), reverse=True)[:top_k]
+
+# ================================
+# QUERY ENHANCEMENT & EXPANSION
+# ================================
+
+def expand_query(original_query, context_type="general", max_variations=3):
+    """
+    Generate related query variations using LLM to improve search recall
+    
+    Args:
+        original_query (str): The original user query
+        context_type (str): Type of context ("general", "rfp", "technical", "compliance")
+        max_variations (int): Maximum number of query variations to generate
+    
+    Returns:
+        list: List of expanded queries including the original
+    """
+    try:
+        if not VERTEX_AVAILABLE:
+            print("⚠️ Vertex AI not available - using original query only")
+            return [original_query]
+        
+        from vertexai.generative_models import GenerativeModel, Part
+        
+        print(f"🔄 Expanding query: '{original_query}' (context: {context_type})")
+        
+        # Context-specific expansion prompts
+        if context_type == "rfp":
+            expansion_prompt = f"""
+You are helping to improve search for RFP (Request for Proposal) documents. Generate {max_variations} alternative ways to search for the same information.
+
+Original query: "{original_query}"
+
+Generate {max_variations} related search queries that would find the same or similar information in RFP documents. Focus on:
+- Different terminology (e.g., "requirements" vs "specifications" vs "criteria")
+- Technical vs business language variations
+- Specific vs general phrasing
+- Common RFP section names and structures
+
+Return only the queries, one per line, without numbering or explanations.
+"""
+        elif context_type == "technical":
+            expansion_prompt = f"""
+You are helping to improve search for technical documentation. Generate {max_variations} alternative ways to search for the same information.
+
+Original query: "{original_query}"
+
+Generate {max_variations} related search queries that would find the same or similar technical information. Focus on:
+- Synonyms and technical terms
+- Different technical approaches or implementations
+- Related technologies or concepts
+- Specific vs general technical language
+
+Return only the queries, one per line, without numbering or explanations.
+"""
+        elif context_type == "compliance":
+            expansion_prompt = f"""
+You are helping to improve search for compliance and regulatory documents. Generate {max_variations} alternative ways to search for the same information.
+
+Original query: "{original_query}"
+
+Generate {max_variations} related search queries that would find the same or similar compliance information. Focus on:
+- Regulatory terminology and standards
+- Compliance frameworks and requirements
+- Legal and policy language variations
+- Audit and certification terms
+
+Return only the queries, one per line, without numbering or explanations.
+"""
+        else:  # general
+            expansion_prompt = f"""
+You are helping to improve document search. Generate {max_variations} alternative ways to search for the same information.
+
+Original query: "{original_query}"
+
+Generate {max_variations} related search queries that would find the same or similar information. Focus on:
+- Synonyms and alternative phrasing
+- More specific or more general versions
+- Different perspectives on the same topic
+- Related concepts and terms
+
+Return only the queries, one per line, without numbering or explanations.
+"""
+        
+        model = GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(
+            [Part.from_text(expansion_prompt)],
+            generation_config={
+                "max_output_tokens": 500,
+                "temperature": 0.7,  # Some creativity for variations
+                "top_p": 0.9,
+            }
+        )
+        
+        expanded_text = response.text.strip()
+        
+        # Parse the response into separate queries
+        expanded_queries = []
+        for line in expanded_text.split('\n'):
+            query = line.strip()
+            # Remove numbering, bullets, or other formatting
+            query = query.lstrip('123456789.- •*')
+            query = query.strip()
+            if query and len(query) > 3:  # Valid query
+                expanded_queries.append(query)
+        
+        # Combine original with expansions (limit to max_variations + 1)
+        all_queries = [original_query] + expanded_queries[:max_variations]
+        
+        print(f"✅ Generated {len(all_queries)} query variations")
+        for i, q in enumerate(all_queries):
+            print(f"  {i+1}. {q}")
+        
+        return all_queries
+        
+    except Exception as e:
+        print(f"❌ Error expanding query: {str(e)}")
+        return [original_query]
+
+def multi_query_search(queries, documents, search_func, **search_kwargs):
+    """
+    Perform search with multiple query variations and aggregate results
+    
+    Args:
+        queries (list): List of query variations
+        documents (list): Documents to search through
+        search_func (function): Search function to use (semantic, hybrid, etc.)
+        **search_kwargs: Additional arguments for search function
+    
+    Returns:
+        list: Aggregated and deduplicated search results
+    """
+    try:
+        print(f"🔄 Performing multi-query search with {len(queries)} variations...")
+        
+        all_results = {}  # Use dict to deduplicate by content
+        query_weights = {}  # Track which queries found each document
+        
+        for i, query in enumerate(queries):
+            print(f"  🔍 Searching variation {i+1}: '{query[:50]}...'")
+            
+            # Perform search for this query variation
+            if 'index_key' in search_kwargs:
+                # Update index key to include query variation
+                base_key = search_kwargs['index_key']
+                search_kwargs['index_key'] = f"{base_key}_q{i}"
+            
+            results = search_func(query, documents, **search_kwargs)
+            
+            # Aggregate results with weighting
+            weight = 1.0 - (i * 0.1)  # Original query gets highest weight
+            weight = max(weight, 0.5)  # Minimum weight of 0.5
+            
+            for doc in results:
+                content_key = hash(doc.get('content', ''))
+                
+                if content_key in all_results:
+                    # Combine scores from multiple queries
+                    existing_doc = all_results[content_key]
+                    
+                    # Weighted average of scores
+                    if 'hybrid_score' in doc:
+                        current_weight = query_weights[content_key]
+                        new_weight = current_weight + weight
+                        existing_score = existing_doc.get('hybrid_score', 0)
+                        new_score = doc.get('hybrid_score', 0)
+                        combined_score = ((existing_score * current_weight) + (new_score * weight)) / new_weight
+                        existing_doc['hybrid_score'] = combined_score
+                        query_weights[content_key] = new_weight
+                    elif 'score' in doc:
+                        current_weight = query_weights[content_key]
+                        new_weight = current_weight + weight
+                        existing_score = existing_doc.get('score', 0)
+                        new_score = doc.get('score', 0)
+                        combined_score = ((existing_score * current_weight) + (new_score * weight)) / new_weight
+                        existing_doc['score'] = combined_score
+                        query_weights[content_key] = new_weight
+                    
+                    # Track which queries found this document
+                    if 'matched_queries' not in existing_doc:
+                        existing_doc['matched_queries'] = []
+                    existing_doc['matched_queries'].append(f"Q{i+1}: {query[:30]}...")
+                    
+                else:
+                    # New document
+                    doc_copy = doc.copy()
+                    doc_copy['matched_queries'] = [f"Q{i+1}: {query[:30]}..."]
+                    
+                    # Apply initial weight
+                    if 'hybrid_score' in doc_copy:
+                        doc_copy['hybrid_score'] *= weight
+                    elif 'score' in doc_copy:
+                        doc_copy['score'] *= weight
+                    
+                    all_results[content_key] = doc_copy
+                    query_weights[content_key] = weight
+        
+        # Convert back to list and sort
+        aggregated_results = list(all_results.values())
+        
+        # Sort by the best available score
+        if aggregated_results and 'hybrid_score' in aggregated_results[0]:
+            aggregated_results.sort(key=lambda x: x.get('hybrid_score', 0), reverse=True)
+        else:
+            aggregated_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        
+        print(f"✅ Multi-query search complete: {len(aggregated_results)} unique results")
+        
+        return aggregated_results
+        
+    except Exception as e:
+        print(f"❌ Error in multi-query search: {str(e)}")
+        print("🔄 Falling back to single query search...")
+        return search_func(queries[0] if queries else "", documents, **search_kwargs)
+
+def enhanced_search(query, documents, index_key, context_type="general", enable_query_expansion=True, 
+                   max_query_variations=3, search_method="hybrid", **search_kwargs):
+    """
+    Enhanced search with query expansion and multi-query aggregation
+    
+    Args:
+        query (str): Original search query
+        documents (list): Documents to search
+        index_key (str): Index key for caching
+        context_type (str): Type of context for query expansion
+        enable_query_expansion (bool): Whether to enable query expansion
+        max_query_variations (int): Maximum query variations to generate
+        search_method (str): "semantic", "hybrid", or "bm25"
+        **search_kwargs: Additional arguments for search function
+    
+    Returns:
+        list: Enhanced search results
+    """
+    try:
+        # Step 1: Query expansion (if enabled)
+        if enable_query_expansion:
+            expanded_queries = expand_query(query, context_type, max_query_variations)
+        else:
+            expanded_queries = [query]
+        
+        # Step 2: Choose search function
+        if search_method == "hybrid":
+            search_func = hybrid_search
+        elif search_method == "bm25":
+            search_func = bm25_search
+        else:  # semantic (fallback)
+            def semantic_search(q, docs, key, **kwargs):
+                # Simple semantic search fallback
+                return sorted(docs, key=lambda x: x.get('score', 0), reverse=True)[:kwargs.get('top_k', 10)]
+            search_func = semantic_search
+        
+        # Step 3: Multi-query search
+        search_kwargs['index_key'] = index_key
+        results = multi_query_search(expanded_queries, documents, search_func, **search_kwargs)
+        
+        return results
+        
+    except Exception as e:
+        print(f"❌ Error in enhanced search: {str(e)}")
+        print("🔄 Falling back to basic search...")
+        # Fallback to basic search
+        if search_method == "hybrid":
+            return hybrid_search(query, documents, index_key, **search_kwargs)
+        else:
+            return sorted(documents, key=lambda x: x.get('score', 0), reverse=True)[:search_kwargs.get('top_k', 10)]
+
+# ================================
 # ENHANCED FILE EXTRACTION
 # ================================
 
@@ -1210,7 +1850,7 @@ def delete_collection(collection_ref, batch_size):
     
     return deleted_count
 
-def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option="global"):
+def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option="global", rerank=False, enable_hybrid_search=True, dense_weight=0.7, sparse_weight=0.3, enable_query_expansion=True, max_query_variations=2, context_type="general"):
     """Get context from knowledge base based on option (global or specific)"""
     try:
         # Get query embedding
@@ -1285,8 +1925,43 @@ def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option=
                             "score": float(score)
                         })
         
-        # Get top chunks by similarity and combine content
-        top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:3]
+        # Apply enhanced search with query expansion, hybrid search, and/or reranking
+        if retrieved_docs:
+            index_key = f"context_{knowledge_base_option}_{org_id}_{project_id}"
+            
+            if enable_query_expansion or enable_hybrid_search:
+                print(f"🚀 Applying enhanced search to {len(retrieved_docs)} documents...")
+                
+                enhanced_candidates = enhanced_search(
+                    query=query,
+                    documents=retrieved_docs,
+                    index_key=index_key,
+                    context_type=context_type,
+                    enable_query_expansion=enable_query_expansion,
+                    max_query_variations=max_query_variations,
+                    search_method="hybrid" if enable_hybrid_search else "semantic",
+                    top_k=10,
+                    dense_weight=dense_weight,
+                    sparse_weight=sparse_weight
+                )
+                
+                if rerank and enhanced_candidates:
+                    print(f"🔄 Applying reranking to {len(enhanced_candidates)} enhanced candidates...")
+                    top_chunks = rerank_documents(query, enhanced_candidates, top_k=3)
+                else:
+                    top_chunks = enhanced_candidates[:3]
+                    
+            elif rerank:
+                print(f"🔄 Applying reranking to {len(retrieved_docs)} documents...")
+                # Get more candidates for reranking (top 10-15), then rerank to get top 3
+                similarity_candidates = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:15]
+                top_chunks = rerank_documents(query, similarity_candidates, top_k=3)
+            else:
+                # Use traditional similarity ranking
+                top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:3]
+        else:
+            top_chunks = []
+        
         context_text = "\n\n".join([doc["content"] for doc in top_chunks])
         
         return context_text if context_text.strip() else "No specific context available."
@@ -2961,6 +3636,13 @@ def chat_with_doc():
         org_id = data.get("orgId")
         file_ids = data.get("fileIds", [])  # Optional: search only specific files
         conversation_history = data.get("conversationHistory", "")
+        rerank = data.get("rerank", True)  # Enable reranking by default
+        enable_hybrid_search = data.get("hybridSearch", True)  # Enable hybrid search by default
+        dense_weight = data.get("denseWeight", 0.7)  # Weight for semantic search
+        sparse_weight = data.get("sparseWeight", 0.3)  # Weight for BM25 search
+        enable_query_expansion = data.get("queryExpansion", True)  # Enable query expansion by default
+        max_query_variations = data.get("maxQueryVariations", 2)  # Number of query variations
+        context_type = data.get("contextType", "rfp")  # Context for query expansion
         
         if not query or not org_id:
             return jsonify({"error": "Query and orgId are required."}), 400
@@ -3104,12 +3786,17 @@ def chat_with_doc():
                 try:
                     # Method 2: Using collection group query
                     print(f"🔍 Trying collection group query...")
-                    rfps_group = db.collection_group("rfps").where("org_id", "==", org_id).limit(10)
+                    # Use the new filter syntax to avoid deprecation warning
+                    from google.cloud.firestore import FieldFilter
+                    rfps_group = db.collection_group("rfps").where(filter=FieldFilter("org_id", "==", org_id)).limit(10)
                     group_rfps = list(rfps_group.stream())
                     print(f"📊 Method 2 - Collection group found {len(group_rfps)} RFP documents")
                     
                 except Exception as method2_error:
                     print(f"❌ Method 2 failed: {str(method2_error)}")
+                    if "index" in str(method2_error).lower():
+                        print(f"💡 SOLUTION: Create the required Firestore index using the link provided above")
+                        print(f"💡 OR: The system will fall back to organization documents only (which is working fine)")
                 
                 try:
                     # Method 3: Check if we can manually construct the path
@@ -3242,8 +3929,43 @@ def chat_with_doc():
             traceback.print_exc()
             # Continue with just organization documents
 
-        # Get top chunks by similarity (from all sources combined)
-        top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:10]
+        # Apply enhanced search (query expansion + hybrid search + reranking)
+        if retrieved_docs:
+            index_key = f"chat_{org_id}"
+            
+            if enable_query_expansion or enable_hybrid_search:
+                print(f"🚀 Applying enhanced search to {len(retrieved_docs)} documents...")
+                
+                # Use enhanced search with query expansion and hybrid search
+                enhanced_candidates = enhanced_search(
+                    query=query,
+                    documents=retrieved_docs,
+                    index_key=index_key,
+                    context_type=context_type,
+                    enable_query_expansion=enable_query_expansion,
+                    max_query_variations=max_query_variations,
+                    search_method="hybrid" if enable_hybrid_search else "semantic",
+                    top_k=20,
+                    dense_weight=dense_weight,
+                    sparse_weight=sparse_weight
+                )
+                
+                if rerank and enhanced_candidates:
+                    print(f"🔄 Applying reranking to {len(enhanced_candidates)} enhanced candidates...")
+                    top_chunks = rerank_documents(query, enhanced_candidates, top_k=10)
+                else:
+                    top_chunks = enhanced_candidates[:10]
+                    
+            elif rerank:
+                print(f"🔄 Applying reranking to {len(retrieved_docs)} documents...")
+                # Get more candidates for reranking (top 20), then rerank to get top 10
+                similarity_candidates = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:20]
+                top_chunks = rerank_documents(query, similarity_candidates, top_k=10)
+            else:
+                # Get top chunks by similarity (from all sources combined)
+                top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:10]
+        else:
+            top_chunks = []
 
         if not top_chunks:
             # No relevant chunks found in any source
@@ -6541,6 +7263,13 @@ def generate_response_v2():
         project_id = data.get("projectId")
         org_id = data.get("orgId")
         knowledge_base_option = data.get("knowledgeBaseOption", "global")  # "global" or "specific"
+        rerank = data.get("rerank", True)  # Enable reranking by default
+        enable_hybrid_search = data.get("hybridSearch", True)  # Enable hybrid search by default
+        dense_weight = data.get("denseWeight", 0.7)  # Weight for semantic search
+        sparse_weight = data.get("sparseWeight", 0.3)  # Weight for BM25 search
+        enable_query_expansion = data.get("queryExpansion", True)  # Enable query expansion by default
+        max_query_variations = data.get("maxQueryVariations", 2)  # Number of query variations
+        context_type = data.get("contextType", "general")  # Context for query expansion
         
         if not query or not project_id or not org_id:
             return jsonify({"error": "Query, projectId, and orgId are required."}), 400
@@ -6592,8 +7321,42 @@ def generate_response_v2():
                             "source_type": "global"
                         })
 
-            # Get top chunks by similarity
-            top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
+            # Apply enhanced search (global knowledge)
+            if retrieved_docs:
+                index_key = f"generate_global_{org_id}"
+                
+                if enable_query_expansion or enable_hybrid_search:
+                    print(f"🚀 Applying enhanced search to {len(retrieved_docs)} documents (global knowledge)...")
+                    
+                    enhanced_candidates = enhanced_search(
+                        query=query,
+                        documents=retrieved_docs,
+                        index_key=index_key,
+                        context_type=context_type,
+                        enable_query_expansion=enable_query_expansion,
+                        max_query_variations=max_query_variations,
+                        search_method="hybrid" if enable_hybrid_search else "semantic",
+                        top_k=15,
+                        dense_weight=dense_weight,
+                        sparse_weight=sparse_weight
+                    )
+                    
+                    if rerank and enhanced_candidates:
+                        print(f"🔄 Applying reranking to {len(enhanced_candidates)} enhanced candidates...")
+                        top_chunks = rerank_documents(query, enhanced_candidates, top_k=5)
+                    else:
+                        top_chunks = enhanced_candidates[:5]
+                        
+                elif rerank:
+                    print(f"🔄 Applying reranking to {len(retrieved_docs)} documents (global knowledge)...")
+                    # Get more candidates for reranking (top 15), then rerank to get top 5
+                    similarity_candidates = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:15]
+                    top_chunks = rerank_documents(query, similarity_candidates, top_k=5)
+                else:
+                    # Get top chunks by similarity
+                    top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
+            else:
+                top_chunks = []
 
             if not top_chunks:
                 return jsonify({
@@ -6683,8 +7446,42 @@ def generate_response_v2():
                             "processing_version": file_data.get("processing_version", "legacy")
                         })
 
-            # Get top chunks by similarity
-            top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
+            # Apply enhanced search (specific knowledge)
+            if retrieved_docs:
+                index_key = f"generate_specific_{org_id}_{project_id}"
+                
+                if enable_query_expansion or enable_hybrid_search:
+                    print(f"🚀 Applying enhanced search to {len(retrieved_docs)} documents (specific knowledge)...")
+                    
+                    enhanced_candidates = enhanced_search(
+                        query=query,
+                        documents=retrieved_docs,
+                        index_key=index_key,
+                        context_type=context_type,
+                        enable_query_expansion=enable_query_expansion,
+                        max_query_variations=max_query_variations,
+                        search_method="hybrid" if enable_hybrid_search else "semantic",
+                        top_k=15,
+                        dense_weight=dense_weight,
+                        sparse_weight=sparse_weight
+                    )
+                    
+                    if rerank and enhanced_candidates:
+                        print(f"🔄 Applying reranking to {len(enhanced_candidates)} enhanced candidates...")
+                        top_chunks = rerank_documents(query, enhanced_candidates, top_k=5)
+                    else:
+                        top_chunks = enhanced_candidates[:5]
+                        
+                elif rerank:
+                    print(f"🔄 Applying reranking to {len(retrieved_docs)} documents (specific knowledge)...")
+                    # Get more candidates for reranking (top 15), then rerank to get top 5
+                    similarity_candidates = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:15]
+                    top_chunks = rerank_documents(query, similarity_candidates, top_k=5)
+                else:
+                    # Get top chunks by similarity
+                    top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
+            else:
+                top_chunks = []
 
             if not top_chunks:
                 return jsonify({
@@ -6756,6 +7553,13 @@ def generate_questionnaire_response():
         knowledge_base_option = data.get('knowledgeBaseOption', 'global')
         org_id = data.get('orgId')
         project_id = data.get('projectId')
+        rerank = data.get('rerank', True)  # Enable reranking by default
+        enable_hybrid_search = data.get('hybridSearch', True)  # Enable hybrid search by default
+        dense_weight = data.get('denseWeight', 0.7)  # Weight for semantic search
+        sparse_weight = data.get('sparseWeight', 0.3)  # Weight for BM25 search
+        enable_query_expansion = data.get('queryExpansion', True)  # Enable query expansion by default
+        max_query_variations = data.get('maxQueryVariations', 2)  # Number of query variations
+        context_type = data.get('contextType', "compliance")  # Context for query expansion (compliance for questionnaires)
         
         print(f"🎯 Questionnaire Generate: {question_text} ({response_type})")
         
@@ -6778,7 +7582,14 @@ def generate_questionnaire_response():
                 query=question_text,
                 org_id=org_id,
                 project_id=project_id,
-                knowledge_base_option=knowledge_base_option
+                knowledge_base_option=knowledge_base_option,
+                rerank=rerank,
+                enable_hybrid_search=enable_hybrid_search,
+                dense_weight=dense_weight,
+                sparse_weight=sparse_weight,
+                enable_query_expansion=enable_query_expansion,
+                max_query_variations=max_query_variations,
+                context_type=context_type
             )
         except:
             knowledge_context = "No specific context available."
