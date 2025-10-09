@@ -863,18 +863,24 @@ def extract_excel_text(file_path, file_type):
             
             text = f"Excel File: {len(sheet_names)} sheet(s) - {', '.join(sheet_names)}\n\n"
             
-            # Process each sheet (limit to first 5 sheets)
-            for i, sheet_name in enumerate(sheet_names[:5]):
+            # Process all sheets (limit to reasonable number for performance)
+            max_sheets = min(len(sheet_names), 20)  # Process up to 20 sheets
+            
+            if len(sheet_names) > 20:
+                text += f"⚠️ Note: Processing first {max_sheets} sheets out of {len(sheet_names)} total sheets for performance.\n\n"
+            for sheet_name in sheet_names[:max_sheets]:
                 try:
-                    df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine, nrows=200)
+                    # Read more rows but still limit for performance
+                    df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine, nrows=2000)
                     
                     text += f"=== Sheet: {sheet_name} ===\n"
                     text += f"Dimensions: {len(df)} rows × {len(df.columns)} columns\n"
                     text += f"Columns: {', '.join(df.columns.astype(str))}\n\n"
                     
-                    # Show sample data
-                    text += "Sample Data:\n"
-                    text += df.head(10).to_string(index=False) + "\n\n"
+                    # Show more sample data for better context
+                    sample_rows = min(50, len(df))  # Show up to 50 rows
+                    text += f"Sample Data (first {sample_rows} rows):\n"
+                    text += df.head(sample_rows).to_string(index=False) + "\n\n"
                     
                     # Add summary statistics for numeric columns
                     numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -1063,7 +1069,7 @@ def extract_csv_text(file_path):
         for encoding in encodings:
             for sep in separators:
                 try:
-                    df = pd.read_csv(file_path, encoding=encoding, sep=sep, nrows=1000)
+                    df = pd.read_csv(file_path, encoding=encoding, sep=sep, nrows=10000)  # Read more rows
                     if len(df.columns) > 1 and len(df) > 0:  # Valid data
                         used_encoding = encoding
                         used_separator = sep
@@ -1082,8 +1088,10 @@ def extract_csv_text(file_path):
             # Clean column names (remove extra whitespace)
             df.columns = df.columns.str.strip()
             
-            text += "Sample Data:\n"
-            text += df.head(15).to_string(index=False) + "\n\n"
+            # Show more sample data for better context
+            sample_rows = min(100, len(df))  # Show up to 100 rows for CSV
+            text += f"Sample Data (first {sample_rows} rows):\n"
+            text += df.head(sample_rows).to_string(index=False) + "\n\n"
             
             # Add summary statistics
             numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -1115,37 +1123,96 @@ def extract_csv_text(file_path):
             return f"CSV processing error: {str(e)}"
 
 def extract_json_text(file_path):
-    """Extract and format JSON data"""
+    """Extract and format JSON data - supports both JSON and JSONL formats"""
     try:
+        # First, try to parse as standard JSON
         with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        
-        # Pretty format JSON for AI understanding
-        formatted = json.dumps(data, indent=2, ensure_ascii=False)
-        
-        # Add summary information
-        text = f"JSON File Analysis:\n"
-        text += f"Structure: {type(data).__name__}\n"
-        
-        if isinstance(data, dict):
-            text += f"Top-level keys: {', '.join(list(data.keys())[:10])}\n"
-        elif isinstance(data, list):
-            text += f"Array length: {len(data)}\n"
-            if len(data) > 0:
-                text += f"First item type: {type(data[0]).__name__}\n"
-        
-        text += f"\nFormatted Content:\n{formatted[:3000]}"
-        if len(formatted) > 3000:
-            text += "\n... (truncated)"
-        
-        return text
+            try:
+                data = json.load(f)
+                
+                # Pretty format JSON for AI understanding
+                formatted = json.dumps(data, indent=2, ensure_ascii=False)
+                
+                # Add summary information
+                text = f"JSON File Analysis:\n"
+                text += f"Structure: {type(data).__name__}\n"
+                
+                if isinstance(data, dict):
+                    text += f"Top-level keys: {', '.join(list(data.keys())[:10])}\n"
+                elif isinstance(data, list):
+                    text += f"Array length: {len(data)}\n"
+                    if len(data) > 0:
+                        text += f"First item type: {type(data[0]).__name__}\n"
+                
+                text += f"\nFormatted Content:\n{formatted[:5000]}"
+                if len(formatted) > 5000:
+                    text += "\n... (truncated)"
+                
+                return text
+                
+            except json.JSONDecodeError:
+                # If standard JSON parsing fails, try JSONL (JSON Lines) format
+                print(f"📄 Standard JSON parsing failed, trying JSONL format...")
+                f.seek(0)  # Reset file pointer
+                lines = f.readlines()
+                
+                json_objects = []
+                parsed_count = 0
+                max_objects = 1000  # Limit for performance
+                
+                for line_num, line in enumerate(lines[:max_objects], 1):
+                    line = line.strip()
+                    if line:  # Skip empty lines
+                        try:
+                            obj = json.loads(line)
+                            json_objects.append(obj)
+                            parsed_count += 1
+                        except json.JSONDecodeError as line_error:
+                            print(f"⚠️ Error parsing line {line_num}: {line_error}")
+                            continue
+                
+                if parsed_count > 0:
+                    # Successfully parsed as JSONL
+                    text = f"JSONL (JSON Lines) File Analysis:\n"
+                    text += f"Total lines processed: {len(lines)}\n"
+                    text += f"Valid JSON objects: {parsed_count}\n"
+                    
+                    if parsed_count > max_objects:
+                        text += f"⚠️ Note: Processed first {max_objects} objects out of {len(lines)} total lines\n"
+                    
+                    # Show structure of first object
+                    if json_objects:
+                        first_obj = json_objects[0]
+                        text += f"Object structure: {type(first_obj).__name__}\n"
+                        if isinstance(first_obj, dict):
+                            text += f"Object keys: {', '.join(list(first_obj.keys())[:10])}\n"
+                    
+                    text += f"\nSample Objects (first {min(10, len(json_objects))}):\n"
+                    for i, obj in enumerate(json_objects[:10]):
+                        text += f"Object {i+1}: {json.dumps(obj, ensure_ascii=False)}\n"
+                    
+                    # Include more objects in a compact format
+                    if len(json_objects) > 10:
+                        text += f"\n... and {len(json_objects) - 10} more objects\n"
+                        
+                        # Add a summary of all objects
+                        all_formatted = "\n".join([json.dumps(obj, ensure_ascii=False) for obj in json_objects])
+                        if len(all_formatted) <= 10000:  # Include all if reasonable size
+                            text += f"\nAll Objects:\n{all_formatted}"
+                        else:
+                            text += f"\nAdditional Objects (truncated):\n{all_formatted[:5000]}..."
+                    
+                    return text
+                else:
+                    # Neither JSON nor JSONL worked, fall back to text
+                    raise json.JSONDecodeError("No valid JSON objects found", "", 0)
         
     except json.JSONDecodeError as e:
-        # Try to read as regular text if JSON parsing fails
+        # Final fallback: read as regular text
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-                return f"JSON parsing failed: {str(e)}\nFile content:\n{content[:1000]}..."
+                return f"JSON parsing failed: {str(e)}\nFile content (as text):\n{content[:2000]}..."
         except:
             return f"JSON processing error: {str(e)}"
     except Exception as e:
@@ -1239,6 +1306,48 @@ def extract_text_with_encoding_detection(file_path):
             return f.read().decode('utf-8', errors='ignore')
     except Exception as e:
         return f"Text extraction error: {str(e)}"
+
+def is_ai_error_response(text):
+    """Check if the AI response is an error message rather than extracted content"""
+    if not text:
+        return False
+    
+    text_lower = text.lower().strip()
+    
+    # Common AI error patterns
+    error_patterns = [
+        "i am unable to fulfill this request",
+        "i cannot fulfill this request", 
+        "i'm unable to",
+        "i cannot",
+        "i am sorry, but i cannot",
+        "i apologize, but i cannot",
+        "sorry, i cannot",
+        "text extraction error",
+        "codec can't decode",
+        "utf-8 codec",
+        "invalid start byte",
+        "encoding error",
+        "unable to extract",
+        "cannot extract",
+        "extraction failed",
+        "need a document to extract",
+        "[object object]",
+        "provided \"[object object]\"",
+        "not a document",
+        "please provide the actual document"
+    ]
+    
+    # Check if the response starts with common error phrases
+    for pattern in error_patterns:
+        if text_lower.startswith(pattern) or pattern in text_lower[:200]:
+            return True
+    
+    # Check if it's suspiciously short for a document (likely an error)
+    if len(text.strip()) < 50 and any(word in text_lower for word in ["error", "unable", "cannot", "failed"]):
+        return True
+        
+    return False
 
 def extract_text_with_ai_direct(file_path, filename):
     """Extract text content directly from any file using Vertex AI multimodal capabilities"""
@@ -1423,7 +1532,7 @@ Return the extracted content as plain text without any formatting or special cha
         # Files that Gemini can handle directly
         gemini_supported_files = [
             # Documents
-            "pdf", "txt", "csv", "json", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
+            "pdf", "txt", "csv", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
             
             # Images  
             "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
@@ -1466,10 +1575,26 @@ Return the extracted content as plain text without any formatting or special cha
                 print(f"⚠️ Direct AI upload failed for {filename}: {e}")
                 return None
         else:
-            # For unsupported file types, try to read as text and let AI process it
+            # For unsupported file types, try to extract text using appropriate method
             try:
-                print(f"📄 Attempting text read for unsupported type: {file_ext}")
-                content = extract_text_with_encoding_detection(file_path)
+                print(f"📄 Attempting text extraction for unsupported type: {file_ext}")
+                
+                # Use proper extraction method based on file type
+                if file_ext == "docx":
+                    content = extract_docx_text(file_path)
+                elif file_ext in ["xlsx", "xls"]:
+                    content = extract_excel_text(file_path, file_ext)
+                elif file_ext == "csv":
+                    content = extract_csv_text(file_path)
+                else:
+                    # For truly unsupported types, try encoding detection
+                    content = extract_text_with_encoding_detection(file_path)
+                
+                # Check if extraction returned an error
+                if content and content.startswith("ERROR:"):
+                    print(f"❌ Extraction failed: {content}")
+                    return None
+                
                 if content and len(content.strip()) > 0:
                     # Limit content length for AI processing
                     if len(content) > 50000:  # 50k char limit
@@ -1479,7 +1604,7 @@ Return the extracted content as plain text without any formatting or special cha
                     print(f"❌ No text content found in {filename}")
                     return None
             except Exception as e:
-                print(f"❌ Failed to read file as text: {e}")
+                print(f"❌ Failed to extract text: {e}")
                 return None
         
         # Generate response with AI
@@ -1515,6 +1640,12 @@ Return the extracted content as plain text without any formatting or special cha
             
             if response and response.text:
                 extracted_text = response.text.strip()
+                
+                # Check if the AI response is an error message
+                if is_ai_error_response(extracted_text):
+                    print(f"❌ AI returned error response for {filename}: {extracted_text[:100]}...")
+                    return None
+                
                 print(f"✅ AI extracted {len(extracted_text)} characters from {filename}")
                 return extracted_text
             else:
@@ -1848,9 +1979,13 @@ def parse_and_chunk(file_path, file_ext, chunk_size=50, max_chunks=1000):
         text = extract_text_with_ai_direct(file_path, filename)
         print(f"🔍 After AI extraction call: {file_path} exists={os.path.exists(file_path)}")
         
-        # If AI extraction fails or returns None, fall back to traditional extraction
-        if not text or text.strip() == "":
-            print(f"🔄 AI extraction failed, falling back to traditional extraction for {filename}")
+        # If AI extraction fails, returns None, or returns an error message, fall back to traditional extraction
+        if not text or text.strip() == "" or is_ai_error_response(text):
+            if text and is_ai_error_response(text):
+                print(f"🔄 AI extraction returned error response, falling back to traditional extraction for {filename}")
+                print(f"📋 AI error response: {text[:100]}...")
+            else:
+                print(f"🔄 AI extraction failed, falling back to traditional extraction for {filename}")
             print(f"🔍 Checking file existence: {file_path} -> {os.path.exists(file_path)}")
             text = extract_text_from_file(file_path, file_ext)
         
@@ -1858,9 +1993,12 @@ def parse_and_chunk(file_path, file_ext, chunk_size=50, max_chunks=1000):
             print(f"❌ No text extracted from {file_path} using any method")
             return []
         
-        # Check for extraction errors from traditional method
-        if text.startswith("ERROR:"):
-            print(f"❌ Extraction error: {text}")
+        # Check for extraction errors from traditional method or remaining AI errors
+        if text.startswith("ERROR:") or is_ai_error_response(text):
+            if is_ai_error_response(text):
+                print(f"❌ AI error response detected in final text: {text[:100]}...")
+            else:
+                print(f"❌ Extraction error: {text}")
             return []
             
         words = text.split()
@@ -2171,7 +2309,7 @@ IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
         # Files that Gemini can handle directly (Excel and Word files are NOT included)
         gemini_supported_files = [
             # Documents
-            "pdf", "txt", "csv", "json", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
+            "pdf", "txt", "csv", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
             
             # Images  
             "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
@@ -3664,7 +3802,7 @@ def bulk_delete_files_v2():
 
 @app.route("/chat", methods=["POST", "OPTIONS"])
 def chat_with_doc():
-    """Chat with documents using embeddings and AI - UNIVERSAL SEARCH (org + all RFP documents)"""
+    """Chat with documents using embeddings and AI - GLOBAL SEARCH (organization knowledge base only)"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -3697,8 +3835,8 @@ def chat_with_doc():
         if not query or not org_id:
             return jsonify({"error": "Query and orgId are required."}), 400
 
-        print(f"🔍 Processing UNIVERSAL chat query: '{query}' for org: {org_id}")
-        print(f"🌐 Searching organization documents AND all RFP support documents")
+        print(f"🔍 Processing GLOBAL chat query: '{query}' for org: {org_id}")
+        print(f"🌐 Searching organization knowledge base documents")
 
         # Get query embedding
         query_embedding = np.array(embed_query(query))
@@ -3762,223 +3900,6 @@ def chat_with_doc():
             "collection": f"document_embeddings/org-{org_id}/files"
         })
 
-        # PART 2: Search ALL RFP support documents for this organization
-        rfp_docs_found = 0
-        rfps_searched = []
-        
-        try:
-            print(f"🎯 Searching ALL RFP support documents for organization: {org_id}...")
-            
-            # Try the new org-based structure first - use org-{org_id} format
-            org_rfp_support_ref = (db.collection("org_rfp_support_embeddings")
-                                 .document(f"org-{org_id}")
-                                 .collection("rfps"))
-            
-            try:
-                # Since /chat-rfp works, let's debug the difference in data access patterns
-                print(f"🔧 Testing Firebase connection (since /chat-rfp works, this should work too)...")
-                
-                # Test the exact same path that /chat-rfp uses (pick a known RFP ID)
-                print(f"🧪 Testing /chat-rfp style access...")
-                test_rfp_id = "b0b0755d-b32f-4fed-83a5-04bf3f86c8e2"  # From your Firestore screenshot
-                
-                try:
-                    # Test direct access like /chat-rfp does
-                    test_rfp_files_ref = (db.collection("org_rfp_support_embeddings")
-                                         .document(f"org-{org_id}")
-                                         .collection("rfps")
-                                         .document(f"rfp-{test_rfp_id}")
-                                         .collection("files"))
-                    
-                    test_files = list(test_rfp_files_ref.stream())
-                    print(f"✅ Direct RFP access (/chat-rfp style): Found {len(test_files)} files")
-                    
-                    if len(test_files) > 0:
-                        print(f"📄 Sample file: {test_files[0].id}")
-                        
-                        # Test chunk access too
-                        test_chunks = list(test_files[0].reference.collection("chunks").limit(2).stream())
-                        print(f"📝 Sample chunks: {len(test_chunks)} chunks found")
-                    
-                except Exception as direct_test_error:
-                    print(f"❌ Direct RFP access failed: {str(direct_test_error)}")
-                
-                # Now test the problematic approach that /chat uses
-                print(f"🧪 Testing /chat style access (listing all RFPs)...")
-                
-                # Check if the parent org document exists and has data
-                org_doc = db.collection("org_rfp_support_embeddings").document(f"org-{org_id}").get()
-                print(f"🔍 Parent org document exists: {org_doc.exists}")
-                
-                if org_doc.exists:
-                    doc_data = org_doc.to_dict()
-                    print(f"📄 Parent document data: {doc_data}")
-                else:
-                    print(f"⚠️ Parent document doesn't exist - this might be the issue!")
-                
-                # Try different ways to access the rfps subcollection
-                try:
-                    # Method 1: Direct subcollection access
-                    rfps_ref = (db.collection("org_rfp_support_embeddings")
-                              .document(f"org-{org_id}")
-                              .collection("rfps"))
-                    
-                    print(f"🔍 Attempting to list RFPs in subcollection...")
-                    all_rfps = list(rfps_ref.stream())
-                    print(f"📊 Method 1 - Found {len(all_rfps)} RFP documents")
-                    
-                    if len(all_rfps) > 0:
-                        print(f"📋 RFP document IDs: {[doc.id for doc in all_rfps]}")
-                    
-                except Exception as method1_error:
-                    print(f"❌ Method 1 failed: {str(method1_error)}")
-                
-                try:
-                    # Method 2: Using collection group query
-                    print(f"🔍 Trying collection group query...")
-                    # Use the new filter syntax to avoid deprecation warning
-                    from google.cloud.firestore import FieldFilter
-                    rfps_group = db.collection_group("rfps").where(filter=FieldFilter("org_id", "==", org_id)).limit(10)
-                    group_rfps = list(rfps_group.stream())
-                    print(f"📊 Method 2 - Collection group found {len(group_rfps)} RFP documents")
-                    
-                except Exception as method2_error:
-                    print(f"❌ Method 2 failed: {str(method2_error)}")
-                    if "index" in str(method2_error).lower():
-                        print(f"💡 SOLUTION: Create the required Firestore index using the link provided above")
-                        print(f"💡 OR: The system will fall back to organization documents only (which is working fine)")
-                
-                try:
-                    # Method 3: Check if we can manually construct the path
-                    manual_rfp_ref = db.collection("org_rfp_support_embeddings").document(f"org-{org_id}").collection("rfps").document(f"rfp-{test_rfp_id}")
-                    manual_rfp_doc = manual_rfp_ref.get()
-                    print(f"📊 Method 3 - Manual RFP document exists: {manual_rfp_doc.exists}")
-                    
-                    if manual_rfp_doc.exists:
-                        manual_data = manual_rfp_doc.to_dict()
-                        print(f"📄 Manual RFP document data: {manual_data}")
-                    
-                except Exception as method3_error:
-                    print(f"❌ Method 3 failed: {str(method3_error)}")
-                
-                # Debug the exact structure
-                print(f"🏗️ Structure comparison:")
-                print(f"   /chat-rfp path: org_rfp_support_embeddings/{f'org-{org_id}'}/rfps/rfp-{test_rfp_id}/files")
-                print(f"   /chat path: org_rfp_support_embeddings/{f'org-{org_id}'}/rfps/* (list all)")
-                
-                target_doc_id = f"org-{org_id}"
-                print(f"🎯 Target org document: {target_doc_id}")
-                
-                # Get all RFP documents for this organization
-                all_org_rfps = list(org_rfp_support_ref.stream())
-                print(f"📊 Found {len(all_org_rfps)} RFP documents in org structure")
-                
-                for rfp_doc in all_org_rfps:
-                    rfp_doc_id = rfp_doc.id
-                    print(f"🔍 Processing RFP document: {rfp_doc_id}")
-                    
-                    # Handle both formats: rfp-{rfp_id} and {rfp_id}
-                    if rfp_doc_id.startswith("rfp-"):
-                        current_rfp_id = rfp_doc_id.replace("rfp-", "")
-                    else:
-                        current_rfp_id = rfp_doc_id
-                    
-                    rfps_searched.append(current_rfp_id)
-                    
-                    print(f"  🔍 Searching RFP support docs for RFP: {current_rfp_id} (doc_id: {rfp_doc_id})")
-                    
-                    # Get files for this RFP
-                    rfp_files_ref = rfp_doc.reference.collection("files")
-                    rfp_files = list(rfp_files_ref.stream())
-                    
-                    print(f"    📁 Found {len(rfp_files)} files in RFP {current_rfp_id}")
-                    
-                    rfp_specific_docs = 0
-                    
-                    # Process each file in this RFP
-                    for file_doc in rfp_files:
-                        file_data = file_doc.to_dict()
-                        
-                        # Get chunks for this file
-                        chunks_ref = file_doc.reference.collection("chunks")
-                        chunks = list(chunks_ref.stream())
-                        
-                        print(f"      📄 File: {file_data.get('filename', 'Unknown')} has {len(chunks)} chunks")
-                        
-                        # Process each chunk
-                        for chunk_doc in chunks:
-                            chunk_data = chunk_doc.to_dict()
-                            
-                            # Convert to numpy array
-                            chunk_embedding = np.array(chunk_data["embedding"])
-                            
-                            # Calculate cosine similarity
-                            score = np.dot(query_embedding, chunk_embedding) / (
-                                np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
-                            )
-                            
-                            if score >= 0.2:  # Similarity threshold
-                                retrieved_docs.append({
-                                    "content": chunk_data.get("content", chunk_data.get("text", "No content available")), 
-                                    "score": float(score),
-                                    "filename": file_data.get("filename", "Unknown"),
-                                    "file_id": file_data.get("file_id", file_doc.id),
-                                    "file_type": file_data.get("file_type", "unknown"),
-                                    "processing_version": file_data.get("processing_version", "legacy"),
-                                    "document_source": "rfp_support",
-                                    "source_type": "rfp_specific",
-                                    "rfp_id": current_rfp_id
-                                })
-                                rfp_docs_found += 1
-                                rfp_specific_docs += 1
-                        
-                        if rfp_specific_docs > 0:
-                            print(f"    ✅ Found {rfp_specific_docs} relevant chunks in RFP {current_rfp_id}")
-                
-                # Also try the old structure if no results found
-                if len(all_org_rfps) == 0:
-                    print(f"⚠️ No RFPs found in new structure, trying old structure...")
-                    
-                    # Try the old structure: direct RFP collections
-                    old_structure_ref = db.collection("org_rfp_support_embeddings")
-                    old_docs = list(old_structure_ref.limit(10).stream())
-                    
-                    print(f"📊 Found {len(old_docs)} documents in old structure")
-                    
-                    for doc in old_docs:
-                        doc_id = doc.id
-                        if doc_id.startswith(f"rfp-"):
-                            # Extract org and rfp from document ID if it contains org info
-                            print(f"🔍 Checking old structure doc: {doc_id}")
-                            
-                            # Try to access files directly
-                            old_files_ref = doc.reference.collection("files")
-                            old_files = list(old_files_ref.stream())
-                            
-                            if len(old_files) > 0:
-                                print(f"    📁 Found {len(old_files)} files in old structure doc {doc_id}")
-                                # Process these files similar to above...
-                
-                if rfp_docs_found > 0:
-                    search_sources.append({
-                        "source": "rfp_support", 
-                        "type": "all_rfps",
-                        "rfps_searched": rfps_searched,
-                        "total_rfps": len(rfps_searched),
-                        "documents_found": rfp_docs_found,
-                        "collection": f"org_rfp_support_embeddings/org-{org_id}/rfps/*"
-                    })
-                    
-            except Exception as rfp_search_error:
-                print(f"⚠️ Error searching organization RFP support documents: {str(rfp_search_error)}")
-                traceback.print_exc()
-                # Continue with just organization documents
-                
-        except Exception as rfp_access_error:
-            print(f"⚠️ Error accessing RFP support collection: {str(rfp_access_error)}")
-            traceback.print_exc()
-            # Continue with just organization documents
-
         # Apply enhanced search (query expansion + hybrid search + reranking)
         if retrieved_docs:
             index_key = f"chat_{org_id}"
@@ -4018,17 +3939,19 @@ def chat_with_doc():
             top_chunks = []
 
         if not top_chunks:
-            # No relevant chunks found in any source
+            # No relevant chunks found in organization documents
             search_summary = {
                 "organization_docs": org_docs_found,
-                "rfp_docs": rfp_docs_found,
-                "total_sources": len(search_sources),
-                "rfps_searched": len(rfps_searched)
+                "total_sources": len(search_sources)
             }
             
-            no_results_message = f"I couldn't find any relevant information in the uploaded documents to answer your question."
-            no_results_message += f" I searched your organization's knowledge base and RFP support documents across {len(rfps_searched)} RFPs."
-            no_results_message += " Please make sure you have uploaded documents that contain information related to your query."
+            no_results_message = f"I couldn't find any relevant information in your organization's knowledge base to answer your question."
+            no_results_message += f" I searched {org_docs_found} organization documents."
+            
+            if org_docs_found == 0:
+                no_results_message += " No documents were found in the system. Please upload relevant documents first."
+            else:
+                no_results_message += " The documents exist but don't contain information relevant to your specific query. Try rephrasing your question or check if the right documents are uploaded."
             
             return jsonify({
                 "query": query, 
@@ -4036,7 +3959,7 @@ def chat_with_doc():
                 "answer": no_results_message,
                 "source_files": [],
                 "relevance_scores": [],
-                "chat_type": "universal",
+                "chat_type": "global",
                 "search_sources": search_sources,
                 "search_summary": search_summary,
                 "api_version": "4.2.0"
@@ -4046,14 +3969,12 @@ def chat_with_doc():
         context_chunks = [doc["content"] for doc in top_chunks]
         answer = generate_answer_with_gcp(query, context_chunks, conversation_history)
         
-        # Get unique source files with enhanced information
+        # Get unique source files from organization documents
         source_files = []
         seen_files = set()
-        org_files = []
-        rfp_files = []
         
         for doc in top_chunks:
-            file_key = f"{doc['filename']}_{doc['file_type']}_{doc['document_source']}_{doc.get('rfp_id', 'none')}"
+            file_key = f"{doc['filename']}_{doc['file_type']}_{doc['document_source']}"
             if file_key not in seen_files:
                 file_info = {
                     "filename": doc["filename"],
@@ -4064,13 +3985,6 @@ def chat_with_doc():
                     "source_type": doc["source_type"]
                 }
                 
-                # Add RFP ID if it's an RFP document
-                if doc["document_source"] == "rfp_support":
-                    file_info["rfp_id"] = doc.get("rfp_id")
-                    rfp_files.append(file_info)
-                else:
-                    org_files.append(file_info)
-                
                 source_files.append(file_info)
                 seen_files.add(file_key)
 
@@ -4078,16 +3992,13 @@ def chat_with_doc():
         search_summary = {
             "total_chunks_found": len(retrieved_docs),
             "top_chunks_used": len(top_chunks),
-            "organization_files": len(org_files),
-            "rfp_files": len(rfp_files),
+            "organization_files": len(source_files),
             "sources_searched": len(search_sources),
-            "rfps_searched": len(rfps_searched),
-            "search_scope": "all_available_org_documents"
+            "search_scope": "organization_knowledge_base"
         }
 
-        print(f"✅ Universal search completed:")
-        print(f"  Organization documents: {org_docs_found} chunks from {len(org_files)} files")
-        print(f"  RFP documents: {rfp_docs_found} chunks from {len(rfp_files)} files across {len(rfps_searched)} RFPs")
+        print(f"✅ Global chat search completed:")
+        print(f"  Organization documents: {org_docs_found} chunks from {len(source_files)} files")
         print(f"  Total relevant chunks: {len(retrieved_docs)}")
         print(f"  Used for answer: {len(top_chunks)}")
 
@@ -4097,20 +4008,15 @@ def chat_with_doc():
             "answer": answer,
             "source_files": source_files,
             "relevance_scores": [doc["score"] for doc in top_chunks],
-            "chat_type": "universal",
+            "chat_type": "global",
             "search_sources": search_sources,
             "search_summary": search_summary,
-            "source_breakdown": {
-                "organization_files": org_files,
-                "rfp_files": rfp_files
-            },
-            "rfps_searched": rfps_searched,
             "api_version": "4.2.0"
         }), 200
 
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ Universal Chat Error: {error_msg}")
+        print(f"❌ Global Chat Error: {error_msg}")
         traceback.print_exc()
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
@@ -4509,131 +4415,6 @@ def check_rfp_support_documents():
     except Exception as e:
         error_msg = str(e)
         print(f"❌ Check RFP Support Documents Error: {error_msg}")
-        return jsonify({"error": "Internal server error", "details": error_msg}), 500
-    
-@app.route("/chat-rfp", methods=["POST", "OPTIONS"])
-def chat_with_rfp_documents():
-    """Chat with RFP-specific support documents (NEW ORG-BASED STRUCTURE)"""
-    if request.method == "OPTIONS":
-        return "", 200
-        
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase is not available"}), 503
-        
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
-        
-    if not VERTEX_AVAILABLE:
-        return jsonify({"error": "AI generation service is not available"}), 503
-        
-    try:
-        data = request.get_json(silent=True)
-        if not data:
-            return jsonify({"error": "No valid JSON input found"}), 400
-
-        query = data.get("query")
-        rfp_id = data.get("rfpId")
-        org_id = data.get("orgId")  # NEW: Required parameter
-        
-        if not query or not rfp_id or not org_id:
-            return jsonify({"error": "Query, rfpId, and orgId are required."}), 400
-
-        print(f"🤖 Processing RFP chat query: '{query}' for Org: {org_id}, RFP: {rfp_id}")
-
-        # Get query embedding
-        query_embedding = np.array(embed_query(query))
-
-        # NEW STRUCTURE: Get RFP support documents
-        rfp_files_ref = (db.collection("org_rfp_support_embeddings")
-                        .document(f"org-{org_id}")
-                        .collection("rfps")
-                        .document(f"rfp-{rfp_id}")
-                        .collection("files"))
-        
-        files = rfp_files_ref.stream()
-        retrieved_docs = []
-        
-        # Process each file
-        for file_doc in files:
-            file_data = file_doc.to_dict()
-            
-            # Get chunks for this file
-            chunks_ref = file_doc.reference.collection("chunks")
-            chunks = chunks_ref.stream()
-            
-            # Process each chunk
-            for chunk_doc in chunks:
-                chunk_data = chunk_doc.to_dict()
-                
-                # Convert to numpy array
-                chunk_embedding = np.array(chunk_data["embedding"])
-                
-                # Calculate cosine similarity
-                score = np.dot(query_embedding, chunk_embedding) / (
-                    np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
-                )
-                
-                if score >= 0.2:  # Similarity threshold
-                    retrieved_docs.append({
-                        "content": chunk_data.get("content", chunk_data.get("text", "No content available")), 
-                        "score": float(score),
-                        "filename": file_data.get("filename", "Unknown"),
-                        "file_id": file_data.get("file_id", file_doc.id),
-                        "file_type": file_data.get("file_type", "unknown"),
-                        "document_type": "support",
-                        "processing_version": file_data.get("processing_version", "legacy")
-                    })
-
-        # Get top chunks by similarity
-        top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:5]
-
-        if not top_chunks:
-            return jsonify({
-                "query": query, 
-                "rfp_id": rfp_id,
-                "org_id": org_id,
-                "retrieved_chunks": [], 
-                "answer": "No relevant information found in the RFP support documents.",
-                "source_files": [],
-                "chat_type": "rfp_support",
-                "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files"
-            }), 200
-
-        # Generate answer
-        context_chunks = [doc["content"] for doc in top_chunks]
-        answer = generate_answer_with_gcp(query, context_chunks, "")
-        
-        # Get unique source files
-        source_files = []
-        seen_files = set()
-        for doc in top_chunks:
-            file_key = f"{doc['filename']}_{doc['file_type']}"
-            if file_key not in seen_files:
-                source_files.append({
-                    "filename": doc["filename"],
-                    "file_type": doc["file_type"],
-                    "file_id": doc["file_id"],
-                    "document_type": doc["document_type"],
-                    "processing_version": doc["processing_version"]
-                })
-                seen_files.add(file_key)
-
-        return jsonify({
-            "query": query, 
-            "rfp_id": rfp_id,
-            "org_id": org_id,
-            "retrieved_chunks": context_chunks, 
-            "answer": answer,
-            "source_files": source_files,
-            "relevance_scores": [doc["score"] for doc in top_chunks],
-            "chat_type": "rfp_support",
-            "storage_structure": f"org_rfp_support_embeddings/org-{org_id}/rfps/rfp-{rfp_id}/files"
-        }), 200
-
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ RFP Chat Error: {error_msg}")
-        traceback.print_exc()
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
     
 @app.route("/delete-rfp-support-document", methods=["DELETE", "OPTIONS"])
@@ -6529,7 +6310,7 @@ IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
         # Files that Gemini can handle directly
         gemini_supported_files = [
             # Documents
-            "pdf", "txt", "csv", "json", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
+            "pdf", "txt", "csv", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
             
             # Images  
             "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
@@ -7447,7 +7228,7 @@ def generate_response_v2():
             }), 200
 
         else:
-            # Use specific project support documents (like /chat-rfp endpoint)
+            # Use specific project support documents
             print("📁 Using specific project support documents")
             
             # Get query embedding
