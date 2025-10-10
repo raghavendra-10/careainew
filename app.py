@@ -6621,30 +6621,67 @@ def upload_file_v2():
                     notify_backend_status(file_id, user_id, 'failed', False, "Embedding generation failed")
                     return
                 
+                print(f"🔄 V2 Starting Firestore storage for {len(embeddings)} embeddings...")
+                
                 # Store in Firestore
                 file_doc_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files").document(file_id)
                 
-                file_doc_ref.set({
-                    "filename": filename,
-                    "file_id": file_id,
-                    "file_type": file_ext,
-                    "chunk_count": len(chunks),
-                    "upload_timestamp": time.time(),
-                    "created_at": datetime.now().isoformat(),
-                    "org_id": org_id,
-                    "user_id": user_id,
-                    "status": "completed"
-                })
+                print(f"📝 V2 Storing file metadata...")
+                
+                try:
+                    file_doc_ref.set({
+                        "filename": filename,
+                        "file_id": file_id,
+                        "file_type": file_ext,
+                        "chunk_count": len(chunks),
+                        "upload_timestamp": time.time(),
+                        "created_at": datetime.now().isoformat(),
+                        "org_id": org_id,
+                        "user_id": user_id,
+                        "status": "completed"
+                    })
+                    print(f"✅ V2 File metadata stored successfully")
+                except Exception as metadata_error:
+                    print(f"❌ V2 Failed to store file metadata: {str(metadata_error)}")
+                    raise
                 
                 # Store embeddings in subcollection
+                print(f"📦 V2 Starting to store {len(embeddings)} embedding chunks...")
                 chunks_collection = file_doc_ref.collection("chunks")
-                for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
-                    chunks_collection.document(f"chunk_{i}").set({
-                        "text": chunk_text,
-                        "embedding": embedding,
-                        "chunk_index": i,
-                        "created_at": datetime.now().isoformat()
-                    })
+                
+                try:
+                    # Use batched writes for better performance and reliability
+                    batch_size = 5  # Smaller batches for better reliability
+                    total_chunks = len(embeddings)
+                    
+                    for i in range(0, total_chunks, batch_size):
+                        batch = db.batch()
+                        end_idx = min(i + batch_size, total_chunks)
+                        
+                        print(f"🔹 V2 Storing batch {i//batch_size + 1} (chunks {i+1}-{end_idx})...")
+                        
+                        for j in range(i, end_idx):
+                            chunk_ref = chunks_collection.document(f"chunk_{j}")
+                            batch.set(chunk_ref, {
+                                "text": chunks[j],
+                                "embedding": embeddings[j],
+                                "chunk_index": j,
+                                "created_at": datetime.now().isoformat()
+                            })
+                        
+                        # Commit the batch
+                        batch.commit()
+                        print(f"✓ V2 Batch committed - stored chunks {i+1}-{end_idx}")
+                        
+                        # Clean up batch object
+                        del batch
+                        import gc
+                        gc.collect()
+                    
+                    print(f"✅ V2 All embedding chunks stored successfully using batched writes")
+                except Exception as chunk_error:
+                    print(f"❌ V2 Failed to store chunk {i}: {str(chunk_error)}")
+                    raise
                 
                 print(f"✅ V2 Embeddings stored successfully for {filename}")
                 
@@ -6730,6 +6767,263 @@ def notify_backend_status(file_id, user_id, status, embedding_complete, error=No
             
     except Exception as e:
         print(f"❌ V2 Webhook error: {str(e)}")
+
+@app.route("/api/v2/delete-org-collections", methods=["DELETE", "OPTIONS"])
+def delete_org_collections():
+    """Delete all collections and documents for a specific organization"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    try:
+        org_id = request.args.get("orgId")
+        
+        if not org_id:
+            return jsonify({"error": "orgId is required"}), 400
+            
+        print(f"🗑️ Starting deletion of all collections for org: {org_id}")
+        
+        deleted_counts = {}
+        total_deleted = 0
+        
+        # Define all collection patterns for this org
+        collections_to_delete = [
+            f"document_embeddings/org-{org_id}",
+            f"org_rfp_support_embeddings/org-{org_id}",
+            f"org_project_support_embeddings/org-{org_id}"
+        ]
+        
+        for collection_path in collections_to_delete:
+            try:
+                print(f"🔍 Checking collection: {collection_path}")
+                
+                # Handle nested collection paths
+                if "/" in collection_path:
+                    parts = collection_path.split("/")
+                    if len(parts) == 2:
+                        # Format: collection/document
+                        parent_collection = parts[0]
+                        document_id = parts[1]
+                        
+                        # Get the document reference
+                        doc_ref = db.collection(parent_collection).document(document_id)
+                        
+                        # Check if document exists
+                        if doc_ref.get().exists:
+                            print(f"📄 Found org document: {document_id}")
+                            
+                            # Delete all subcollections with nested cleanup
+                            subcollection_names = ["files", "rfps", "projects"]  # Known subcollections
+                            subcollection_count = 0
+                            
+                            for subcol_name in subcollection_names:
+                                try:
+                                    subcol_ref = doc_ref.collection(subcol_name)
+                                    
+                                    # Special handling for files collection - delete chunks first
+                                    if subcol_name == "files":
+                                        print(f"  🗂️ Processing files collection...")
+                                        files_docs = list(subcol_ref.stream())
+                                        
+                                        for file_doc in files_docs:
+                                            file_id = file_doc.id
+                                            print(f"    📄 Deleting file: {file_id}")
+                                            
+                                            # Delete chunks subcollection first
+                                            chunks_ref = file_doc.reference.collection("chunks")
+                                            chunks_deleted = delete_collection(chunks_ref, batch_size=10)
+                                            if chunks_deleted > 0:
+                                                print(f"      ✅ Deleted {chunks_deleted} chunks")
+                                                subcollection_count += chunks_deleted
+                                            
+                                            # Delete the file document
+                                            file_doc.reference.delete()
+                                            subcollection_count += 1
+                                            print(f"      ✅ Deleted file document: {file_id}")
+                                    
+                                    # Special handling for rfps collection - delete files and chunks
+                                    elif subcol_name == "rfps":
+                                        print(f"  🗂️ Processing RFPs collection...")
+                                        rfp_docs = list(subcol_ref.stream())
+                                        
+                                        for rfp_doc in rfp_docs:
+                                            rfp_id = rfp_doc.id
+                                            print(f"    📁 Deleting RFP: {rfp_id}")
+                                            
+                                            # Delete files subcollection in RFP
+                                            rfp_files_ref = rfp_doc.reference.collection("files")
+                                            rfp_files = list(rfp_files_ref.stream())
+                                            
+                                            for rfp_file in rfp_files:
+                                                # Delete chunks in RFP file
+                                                rfp_chunks_ref = rfp_file.reference.collection("chunks")
+                                                rfp_chunks_deleted = delete_collection(rfp_chunks_ref, batch_size=10)
+                                                if rfp_chunks_deleted > 0:
+                                                    print(f"        ✅ Deleted {rfp_chunks_deleted} RFP file chunks")
+                                                    subcollection_count += rfp_chunks_deleted
+                                                
+                                                # Delete RFP file
+                                                rfp_file.reference.delete()
+                                                subcollection_count += 1
+                                            
+                                            # Delete the RFP document
+                                            rfp_doc.reference.delete()
+                                            subcollection_count += 1
+                                            print(f"      ✅ Deleted RFP document: {rfp_id}")
+                                    
+                                    else:
+                                        # Standard deletion for other collections
+                                        count = delete_collection(subcol_ref, batch_size=10)
+                                        if count > 0:
+                                            print(f"  ✅ Deleted {count} documents from {subcol_name}")
+                                            subcollection_count += count
+                                            
+                                except Exception as subcol_error:
+                                    print(f"  ⚠️ Error deleting subcollection {subcol_name}: {subcol_error}")
+                            
+                            # Delete the parent document
+                            doc_ref.delete()
+                            subcollection_count += 1
+                            print(f"  ✅ Deleted parent document: {document_id}")
+                            
+                            deleted_counts[collection_path] = subcollection_count
+                            total_deleted += subcollection_count
+                        else:
+                            print(f"  ℹ️ Document not found: {document_id}")
+                            deleted_counts[collection_path] = 0
+                else:
+                    # Direct collection reference
+                    collection_ref = db.collection(collection_path)
+                    count = delete_collection(collection_ref, batch_size=10)
+                    deleted_counts[collection_path] = count
+                    total_deleted += count
+                    
+                    if count > 0:
+                        print(f"✅ Deleted {count} documents from {collection_path}")
+                    else:
+                        print(f"ℹ️ No documents found in {collection_path}")
+                        
+            except Exception as col_error:
+                print(f"❌ Error processing collection {collection_path}: {str(col_error)}")
+                deleted_counts[collection_path] = f"Error: {str(col_error)}"
+        
+        print(f"🎉 Deletion completed for org {org_id}. Total documents deleted: {total_deleted}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Successfully deleted collections for organization {org_id}",
+            "org_id": org_id,
+            "total_deleted": total_deleted,
+            "deleted_counts": deleted_counts,
+            "collections_processed": collections_to_delete
+        }), 200
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error deleting org collections: {error_msg}")
+        return jsonify({
+            "error": "Failed to delete org collections", 
+            "details": error_msg
+        }), 500
+
+@app.route("/api/v2/delete-org-files", methods=["DELETE", "OPTIONS"])
+def delete_org_files_only():
+    """Delete only the files collections and their chunks for a specific organization"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase is not available"}), 503
+        
+    try:
+        org_id = request.args.get("orgId")
+        
+        if not org_id:
+            return jsonify({"error": "orgId is required"}), 400
+            
+        print(f"🗑️ Starting deletion of files collections for org: {org_id}")
+        
+        deleted_counts = {}
+        total_deleted = 0
+        
+        # Target only the files collections
+        collections_to_check = [
+            f"document_embeddings/org-{org_id}",
+            f"org_rfp_support_embeddings/org-{org_id}",
+            f"org_project_support_embeddings/org-{org_id}"
+        ]
+        
+        for collection_path in collections_to_check:
+            try:
+                print(f"🔍 Checking files in: {collection_path}")
+                
+                parts = collection_path.split("/")
+                parent_collection = parts[0]
+                document_id = parts[1]
+                
+                # Get the document reference
+                doc_ref = db.collection(parent_collection).document(document_id)
+                
+                # Check if document exists
+                if doc_ref.get().exists:
+                    print(f"📄 Found org document: {document_id}")
+                    
+                    # Only delete files collection
+                    files_ref = doc_ref.collection("files")
+                    files_docs = list(files_ref.stream())
+                    files_deleted = 0
+                    
+                    if files_docs:
+                        print(f"  🗂️ Found {len(files_docs)} files to delete...")
+                        
+                        for file_doc in files_docs:
+                            file_id = file_doc.id
+                            print(f"    📄 Deleting file: {file_id}")
+                            
+                            # Delete chunks subcollection first
+                            chunks_ref = file_doc.reference.collection("chunks")
+                            chunks_deleted = delete_collection(chunks_ref, batch_size=10)
+                            if chunks_deleted > 0:
+                                print(f"      ✅ Deleted {chunks_deleted} chunks")
+                                files_deleted += chunks_deleted
+                            
+                            # Delete the file document
+                            file_doc.reference.delete()
+                            files_deleted += 1
+                            print(f"      ✅ Deleted file document: {file_id}")
+                    else:
+                        print(f"  ℹ️ No files found in {collection_path}")
+                    
+                    deleted_counts[collection_path] = files_deleted
+                    total_deleted += files_deleted
+                else:
+                    print(f"  ℹ️ Document not found: {document_id}")
+                    deleted_counts[collection_path] = 0
+                        
+            except Exception as col_error:
+                print(f"❌ Error processing collection {collection_path}: {str(col_error)}")
+                deleted_counts[collection_path] = f"Error: {str(col_error)}"
+        
+        print(f"🎉 Files deletion completed for org {org_id}. Total documents deleted: {total_deleted}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Successfully deleted files for organization {org_id}",
+            "org_id": org_id,
+            "total_deleted": total_deleted,
+            "deleted_counts": deleted_counts,
+            "collections_processed": collections_to_check
+        }), 200
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error deleting org files: {error_msg}")
+        return jsonify({
+            "error": "Failed to delete org files", 
+            "details": error_msg
+        }), 500
 
 @app.route("/api/v2/status", methods=["GET", "OPTIONS"])
 def get_file_status_v2():
