@@ -1,0 +1,95 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: careai-enhanced
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/execution-environment: gen2
+spec:
+  template:
+    metadata:
+      annotations:
+        # Performance optimizations for enhanced system
+        run.googleapis.com/memory: "4Gi"
+        run.googleapis.com/cpu: "2"
+        run.googleapis.com/max-instances: "10"
+        run.googleapis.com/min-instances: "1"
+        run.googleapis.com/timeout: "900s"
+        run.googleapis.com/startup-timeout: "120s"
+        run.googleapis.com/session-affinity: true
+    spec:
+      containerConcurrency: 20
+      containers:
+      - image: gcr.io/PROJECT_ID/careai-enhanced:latest
+        ports:
+        - containerPort: 8080
+        env:
+        # Core configuration
+        - name: PORT
+          value: "8080"
+        - name: FLASK_ENV
+          value: "production"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        # Performance settings for enhanced system
+        - name: MAX_CONCURRENT_UPLOADS
+          value: "3"
+        - name: MAX_CONCURRENT_EMBEDDINGS
+          value: "2"
+        - name: MAX_CONCURRENT_WEBHOOKS
+          value: "5"
+        - name: TASK_TIMEOUT
+          value: "1800"
+        
+        # Redis configuration (update with your Redis instance)
+        - name: REDIS_URL
+          value: "redis://10.x.x.x:6379/0"
+        - name: REDIS_HOST
+          value: "10.x.x.x"
+        - name: REDIS_PORT
+          value: "6379"
+        
+        # Secrets from Secret Manager
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-api-key
+              key: latest
+        - name: PINECONE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pinecone-api-key
+              key: latest
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          valueFrom:
+            secretKeyRef:
+              name: firebase-credentials
+              key: latest
+        
+        resources:
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+        
+        # Health check
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3

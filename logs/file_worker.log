@@ -1,0 +1,50 @@
+[2025-10-14 12:29:42,123: WARNING/MainProcess] /Users/raghavendra/careainew/venv/lib/python3.13/site-packages/celery/worker/consumer/consumer.py:507: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2025-10-14 12:29:42,130: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2025-10-14 12:29:42,130: WARNING/MainProcess] /Users/raghavendra/careainew/venv/lib/python3.13/site-packages/celery/worker/consumer/consumer.py:507: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2025-10-14 12:29:42,131: INFO/MainProcess] mingle: searching for neighbors
+[2025-10-14 12:29:43,137: INFO/MainProcess] mingle: all alone
+[2025-10-14 12:29:43,155: INFO/MainProcess] file_worker@Raghavendras-MacBook-Air.local ready.
+[2025-10-14 12:31:12,717: INFO/MainProcess] sync with celery@Raghavendras-MacBook-Air.local
+[2025-10-14 12:34:32,400: INFO/MainProcess] Task tasks.process_file_upload[282cb94a-9b0f-4337-9aa2-a7729060410c] received
+[2025-10-14 12:34:32,408: WARNING/ForkPoolWorker-3] 📊 Progress updated: 282cb94a-9b0f-4337-9aa2-a7729060410c → processing (10%)
+[2025-10-14 12:34:33,018: WARNING/ForkPoolWorker-3] ✅ Queue system initialized
+[2025-10-14 12:34:34,013: WARNING/ForkPoolWorker-3] ✅ Using fire.json for Firebase/Firestore
+[2025-10-14 12:34:34,013: WARNING/ForkPoolWorker-3] ✅ Successfully initialized Firebase
+[2025-10-14 12:34:34,080: WARNING/ForkPoolWorker-3] ✅ Using fire.json for Vertex AI
+[2025-10-14 12:34:34,080: WARNING/ForkPoolWorker-3] ✅ Successfully initialized Vertex AI
+[2025-10-14 12:34:34,104: WARNING/ForkPoolWorker-3] ✅ Successfully initialized OpenAI client
+[2025-10-14 12:34:34,109: WARNING/ForkPoolWorker-3] 📊 Progress updated: 282cb94a-9b0f-4337-9aa2-a7729060410c → processing (25%)
+[2025-10-14 12:34:34,109: WARNING/ForkPoolWorker-3] 🔍 About to call AI extraction: /Users/raghavendra/careainew/uploads/47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf exists=True
+[2025-10-14 12:34:34,109: WARNING/ForkPoolWorker-3] 🔍 AI extraction - file_path: /Users/raghavendra/careainew/uploads/47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf
+[2025-10-14 12:34:34,110: WARNING/ForkPoolWorker-3] 🔍 AI extraction - absolute path: /Users/raghavendra/careainew/uploads/47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf
+[2025-10-14 12:34:34,110: WARNING/ForkPoolWorker-3] 🔍 AI extraction - current working directory: /Users/raghavendra/careainew
+[2025-10-14 12:34:34,110: WARNING/ForkPoolWorker-3] 🤖 AI-based text extraction for: 47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf (129157 bytes)
+[2025-10-14 12:34:34,110: WARNING/ForkPoolWorker-3] ✅ Using AI multimodal extraction for 47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf (application/pdf, 129157 bytes)
+[2025-10-14 12:34:34,110: WARNING/ForkPoolWorker-3] 🤖 Sending to AI for text extraction...
+[2025-10-14 12:34:40,017: WARNING/ForkPoolWorker-3] ✅ AI extracted 1025 characters from 47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf
+[2025-10-14 12:34:40,020: WARNING/ForkPoolWorker-3] 🔍 After AI extraction call: /Users/raghavendra/careainew/uploads/47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf exists=True
+[2025-10-14 12:34:40,021: WARNING/ForkPoolWorker-3] ✅ Successfully chunked file into 4 chunks
+[2025-10-14 12:34:40,023: WARNING/ForkPoolWorker-3] 📊 Progress updated: 282cb94a-9b0f-4337-9aa2-a7729060410c → embedding (50%)
+[2025-10-14 12:34:40,024: WARNING/ForkPoolWorker-3] 🚀 Processing 4 chunks with caching optimization
+[2025-10-14 12:34:40,024: WARNING/ForkPoolWorker-3] 🚀 Embedding 4 new chunks in batches of 100
+[2025-10-14 12:34:42,254: INFO/ForkPoolWorker-3] HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 200 OK"
+[2025-10-14 12:34:42,259: WARNING/ForkPoolWorker-3] Progress update for 47404e78-60b6-468e-b1f8-bc58871d9006: 95.0% - Generating embeddings (4/4 new)
+[2025-10-14 12:34:42,260: WARNING/ForkPoolWorker-3] ✓ Processed batch 1: 4/4 new chunks
+[2025-10-14 12:34:42,260: WARNING/ForkPoolWorker-3] ✅ Generated 4 embeddings (5x faster with optimizations)
+[2025-10-14 12:34:42,263: WARNING/ForkPoolWorker-3] 📊 Progress updated: 282cb94a-9b0f-4337-9aa2-a7729060410c → storing (75%)
+[2025-10-14 12:34:46,098: WARNING/ForkPoolWorker-3] 📦 Committed final batch of 4 embeddings
+[2025-10-14 12:34:46,099: WARNING/ForkPoolWorker-3] ✅ Stored 4 embeddings for COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf
+[2025-10-14 12:34:46,099: WARNING/ForkPoolWorker-3] 🗑️ Cleaned up: /Users/raghavendra/careainew/uploads/47404e78-60b6-468e-b1f8-bc58871d9006_COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf
+[2025-10-14 12:34:46,101: WARNING/ForkPoolWorker-3] 📊 Progress updated: 282cb94a-9b0f-4337-9aa2-a7729060410c → completed (100%)
+[2025-10-14 12:34:46,105: WARNING/ForkPoolWorker-3] 📊 Progress updated: 282cb94a-9b0f-4337-9aa2-a7729060410c → completed (100%)
+[2025-10-14 12:34:46,105: INFO/ForkPoolWorker-3] Task tasks.process_file_upload[282cb94a-9b0f-4337-9aa2-a7729060410c] succeeded in 13.701537875000213s: {'success': True, 'file_id': '47404e78-60b6-468e-b1f8-bc58871d9006', 'chunks_processed': 4, 'embeddings_generated': 4, 'filename': 'COTTONIC AFFILIATE SPONSORSHIP AGREEMENT (4).pdf'}

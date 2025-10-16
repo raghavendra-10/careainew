@@ -1,0 +1,17 @@
+[2025-10-14 12:29:42,237: WARNING/MainProcess] /Users/raghavendra/careainew/venv/lib/python3.13/site-packages/celery/worker/consumer/consumer.py:507: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2025-10-14 12:29:42,241: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2025-10-14 12:29:42,242: WARNING/MainProcess] /Users/raghavendra/careainew/venv/lib/python3.13/site-packages/celery/worker/consumer/consumer.py:507: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2025-10-14 12:29:42,243: INFO/MainProcess] mingle: searching for neighbors
+[2025-10-14 12:29:43,249: INFO/MainProcess] mingle: all alone
+[2025-10-14 12:29:43,270: INFO/MainProcess] embedding_worker@Raghavendras-MacBook-Air.local ready.
+[2025-10-14 12:31:12,717: INFO/MainProcess] sync with celery@Raghavendras-MacBook-Air.local
