@@ -24,11 +24,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code (excluding development files)
-COPY app.py .
-COPY utils.py .
-COPY redis_manager.py .
-COPY file_processor.py .
+# Copy all Python files
+COPY *.py .
 COPY .env .
 
 # Create necessary directories
