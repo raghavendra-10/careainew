@@ -3,7 +3,7 @@ anyio==4.9.0
 blinker==1.9.0
 CacheControl==0.14.3
 cachetools==5.5.2
-certifi==2025.4.26
+certifi==2025.10.5
 cffi==1.17.1
 chardet==5.2.0
 charset-normalizer==3.4.2
@@ -95,4 +95,19 @@ upstash-redis==0.15.0
 celery==5.3.4
 flower==2.0.1
 kombu==5.3.4
+
+# LlamaIndex + NeonDB Dependencies
+llama-index>=0.10.0
+llama-index-vector-stores-postgres
+llama-index-embeddings-huggingface
+llama-index-llms-huggingface
+llama-index-readers-file
+llama-cloud-services==0.6.76
+unstructured[pdf]>=0.15.15
+python-magic>=0.4.27
+asyncpg>=0.29.0
+sqlalchemy>=2.0.0
+pgvector>=0.3.0
+requests>=2.31.0
+gradio_client>=0.7.0
 

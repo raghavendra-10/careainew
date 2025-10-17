@@ -3173,19 +3173,69 @@ def upload_file():
             try:
                 update_upload_progress(upload_id, "Processing", 25, "File saved", filename)
                 
-                # Extract text and create chunks (for embedding)
-                update_upload_progress(upload_id, "Processing", 50, "Extracting text with enhanced processing", filename)
-                chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
-                
-                if not chunks:
-                    print(f"❌ No content extracted from {filename}")
-                    update_upload_progress(upload_id, "error", 0, "No content extracted", filename)
-                    # Update backend to mark as NOT having embeddings
-                    update_backend_embedding_status(file_id, org_id, False)
-                    return
+                # Choose processing method based on USE_LLAMAINDEX flag
+                if USE_LLAMAINDEX:
+                    print(f"🚀 Processing with LlamaIndex (skipping traditional chunking)...")
+                    update_upload_progress(upload_id, "Processing", 50, "Processing with LlamaIndex", filename)
                     
-                # Generate embeddings
-                update_upload_progress(upload_id, "Processing", 75, "Generating embeddings", filename)
+                    try:
+                        from llamaindex_integration import process_file_with_llamaindex
+                        
+                        result = process_file_with_llamaindex(
+                            file_path=save_path,
+                            file_id=file_id,
+                            org_id=org_id,
+                            user_id=user_id,
+                            filename=filename
+                        )
+                        
+                        if result.get("success"):
+                            update_upload_progress(upload_id, "completed", 100, "File processed successfully with LlamaIndex", filename)
+                            print(f"✅ LlamaIndex processing complete: {result}")
+                            
+                            # Update backend to mark as having embeddings
+                            update_backend_embedding_status(file_id, org_id, True)
+                            
+                            # LlamaIndex handles everything including storage, so we can return early
+                            print(f"✅ LlamaIndex handled storage to NeonDB directly")
+                            return  # Exit successfully - no need for traditional storage
+                        else:
+                            print(f"❌ LlamaIndex processing failed, falling back to traditional processing")
+                            raise Exception("LlamaIndex processing failed")
+                            
+                    except Exception as e:
+                        print(f"❌ LlamaIndex error: {str(e)}")
+                        print(f"🔄 Falling back to traditional processing...")
+                        # Fall through to traditional processing
+                        
+                        # Extract text and create chunks (for embedding)
+                        update_upload_progress(upload_id, "Processing", 50, "Extracting text with enhanced processing", filename)
+                        chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+                        
+                        if not chunks:
+                            print(f"❌ No content extracted from {filename}")
+                            update_upload_progress(upload_id, "error", 0, "No content extracted", filename)
+                            # Update backend to mark as NOT having embeddings
+                            update_backend_embedding_status(file_id, org_id, False)
+                            return
+                            
+                        # Generate embeddings
+                        update_upload_progress(upload_id, "Processing", 75, "Generating embeddings", filename)
+                else:
+                    # Traditional processing
+                    # Extract text and create chunks (for embedding)
+                    update_upload_progress(upload_id, "Processing", 50, "Extracting text with enhanced processing", filename)
+                    chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+                    
+                    if not chunks:
+                        print(f"❌ No content extracted from {filename}")
+                        update_upload_progress(upload_id, "error", 0, "No content extracted", filename)
+                        # Update backend to mark as NOT having embeddings
+                        update_backend_embedding_status(file_id, org_id, False)
+                        return
+                        
+                    # Generate embeddings
+                    update_upload_progress(upload_id, "Processing", 75, "Generating embeddings", filename)
                 embeddings = embed_chunks(chunks, upload_id=upload_id, org_id=org_id, filename=filename)
                 
                 # Store in Firestore using fileId as document ID
@@ -6653,6 +6703,11 @@ def post_proposal_agent_results_to_backend(rfp_id, agent_results, auth_token):
 # V2 API ROUTES FOR MVP
 # ================================
 
+# ================================
+# LLAMAINDEX INTEGRATION FLAGS
+# ================================
+USE_LLAMAINDEX = os.getenv("USE_LLAMAINDEX", "true").lower() == "true"
+
 @app.route("/api/v2/upload", methods=["POST", "OPTIONS"])
 def upload_file_v2():
     """V2 Upload endpoint enhanced with Redis progress tracking"""
@@ -6750,6 +6805,49 @@ def upload_file_v2():
                 # Notify: embedding phase started
                 notify_backend_status(file_id, user_id, 'embedding', False)
                     
+                # Choose processing method based on USE_LLAMAINDEX flag
+                print(f"🔧 USE_LLAMAINDEX flag: {USE_LLAMAINDEX}")
+                if USE_LLAMAINDEX:
+                    print(f"🚀 V2 Processing with LlamaIndex...")
+                    print(f"📄 File: {filename}, Path: {save_path}")
+                    print(f"🆔 IDs - File: {file_id}, Org: {org_id}, User: {user_id}")
+                    try:
+                        print(f"📥 Importing LlamaIndex integration...")
+                        from llamaindex_integration import process_file_with_llamaindex
+                        
+                        print(f"🔄 Calling LlamaIndex processor...")
+                        result = process_file_with_llamaindex(
+                            file_path=save_path,
+                            file_id=file_id,
+                            org_id=org_id,
+                            user_id=user_id,
+                            filename=filename
+                        )
+                        print(f"✅ LlamaIndex result: {result}")
+                        
+                        print(f"✅ V2 LlamaIndex processing complete: {result}")
+                        
+                        if result.get("success"):
+                            # Notify Node.js backend: completed
+                            notify_backend_status(file_id, user_id, 'completed', True)
+                            
+                            # Clean up temporary files
+                            if 'save_path' in locals() and save_path and os.path.exists(save_path):
+                                os.remove(save_path)
+                                print(f"🗑️ V2 Cleaned up temporary file: {save_path}")
+                            
+                            return  # Exit successfully
+                        else:
+                            # Notify failure and fallback to traditional processing
+                            print(f"❌ V2 LlamaIndex failed, falling back to traditional processing")
+                            
+                    except Exception as llamaindex_error:
+                        print(f"❌ V2 LlamaIndex error: {str(llamaindex_error)}")
+                        print(f"🔄 V2 Falling back to traditional processing...")
+                
+                # Traditional processing (fallback or when USE_LLAMAINDEX=false)
+                print(f"🔄 V2 Using traditional processing...")
+                
                 # Generate embeddings
                 print(f"🧠 V2 Generating embeddings for {len(chunks)} chunks")
                 embeddings = embed_chunks(chunks, upload_id=file_id, org_id=org_id, filename=filename)
@@ -6874,7 +6972,227 @@ def upload_file_v2():
             except:
                 pass
 
-def notify_backend_status(file_id, user_id, status, embedding_complete, error=None):
+@app.route("/api/v3/upload", methods=["POST", "OPTIONS"])
+def upload_file_v3():
+    """V3 Upload endpoint - Direct LlamaIndex processing with custom HF embeddings"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    if not USE_LLAMAINDEX:
+        return jsonify({"error": "V3 upload requires LlamaIndex (USE_LLAMAINDEX=true)"}), 503
+        
+    save_path = None
+    try:
+        org_id = request.args.get("orgId")
+        file_id = request.args.get("fileId")
+        user_id = request.args.get("userId")
+        
+        print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}")
+        
+        if not org_id or not file_id or not user_id:
+            return jsonify({"error": "orgId, fileId, and userId are required"}), 400
+
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+
+        file = request.files["file"]
+        filename = file.filename
+        
+        # Fix double extension issue
+        if filename.count('.') > 1:
+            parts = filename.split('.')
+            if len(parts) >= 2 and parts[-1].lower() == parts[-2].lower():
+                filename = '.'.join(parts[:-1])
+                print(f"🔧 Fixed double extension: {file.filename} -> {filename}")
+        
+        file_ext = filename.split(".")[-1].lower()
+        print(f"📋 V3 Processing file type: {file_ext} (direct LlamaIndex processing)")
+
+        # Notify backend: processing started
+        notify_backend_status(file_id, user_id, 'processing', False, source="flask_ai_v3")
+        
+        # Save file temporarily
+        timestamp = int(time.time())
+        safe_filename = f"{file_id}_{filename}"
+        save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
+        
+        file.save(save_path)
+        print(f"✅ V3 File saved: {save_path}")
+        
+        if not os.path.exists(save_path):
+            return jsonify({"error": "Failed to save file"}), 500
+            
+        file_size = os.path.getsize(save_path)
+        print(f"📏 File size: {file_size} bytes")
+        
+        # Notify backend: embedding phase started
+        notify_backend_status(file_id, user_id, 'embedding', False, source="flask_ai_v3")
+        
+        # Start LlamaIndex processing in background
+        print(f"🚀 V3 Starting LlamaIndex processing in background...")
+        print(f"📄 File: {filename}, Path: {save_path}")
+        print(f"🆔 IDs - File: {file_id}, Org: {org_id}, User: {user_id}")
+        
+        def process_file_v3_async():
+            try:
+                print(f"🚀 V3 Starting direct NeonDB processing...")
+                from direct_neondb_storage import process_file_direct_storage
+                
+                result = process_file_direct_storage(
+                    file_path=save_path,
+                    file_id=file_id,
+                    org_id=org_id,
+                    user_id=user_id,
+                    filename=filename
+                )
+                
+                print(f"✅ V3 Direct storage result: {result}")
+                
+                if result.get("success"):
+                    # Success - notify completion
+                    notify_backend_status(file_id, user_id, 'completed', True, source="flask_ai_v3")
+                    print(f"✅ V3 Processing complete: {result.get('chunks_stored', 0)} chunks stored")
+                else:
+                    # Direct storage failed
+                    error_msg = result.get("error", "Unknown storage error")
+                    print(f"❌ V3 Direct storage failed: {error_msg}")
+                    notify_backend_status(file_id, user_id, 'failed', False, f"Direct storage failed: {error_msg}")
+                    
+            except Exception as e:
+                print(f"❌ V3 Background processing error: {str(e)}")
+                notify_backend_status(file_id, user_id, 'failed', False, str(e))
+            finally:
+                # Cleanup files
+                if save_path and os.path.exists(save_path):
+                    os.unlink(save_path)
+                    print(f"🗑️ V3 Cleaned up: {save_path}")
+        
+        # Start background processing
+        Thread(target=process_file_v3_async, daemon=True).start()
+        
+        # Return immediate response
+        return jsonify({
+            "message": "File upload successful, processing started with direct NeonDB storage",
+            "file_id": file_id,
+            "filename": filename,
+            "status": "processing",
+            "processing_method": "direct_neondb_v3",
+            "embedding_model": "custom_hf_endpoint",
+            "vector_dimension": os.getenv("VECTOR_DIM", "2560"),
+            "note": "Using LlamaIndex parsing with direct database storage, bypassing vector store"
+        }), 202
+            
+    except Exception as e:
+        print(f"❌ V3 Upload error: {str(e)}")
+        
+        # Cleanup on error
+        if save_path and os.path.exists(save_path):
+            os.unlink(save_path)
+            print(f"🗑️ V3 Cleaned up after error: {save_path}")
+        
+        # Notify backend of failure
+        if 'user_id' in locals() and 'file_id' in locals():
+            notify_backend_status(file_id, user_id, 'failed', False, str(e))
+        
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v2/search", methods=["POST", "OPTIONS"])
+def search_v2():
+    """V2 Search endpoint with LlamaIndex integration"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        data = request.get_json()
+        query = data.get("query")
+        org_id = data.get("orgId")
+        top_k = data.get("top_k", 10)
+        file_ids = data.get("fileIds")  # Optional
+        
+        if not query or not org_id:
+            return jsonify({"error": "Missing required fields: query, orgId"}), 400
+        
+        if USE_LLAMAINDEX:
+            print(f"🔍 V2 LlamaIndex Search: '{query}' in org: {org_id}")
+            try:
+                from llamaindex_integration import search_with_llamaindex
+                
+                results = search_with_llamaindex(
+                    query=query,
+                    org_id=org_id,
+                    top_k=top_k,
+                    file_ids=file_ids
+                )
+                
+                return jsonify({
+                    "query": query,
+                    "results": results,
+                    "total_found": len(results),
+                    "search_type": "llamaindex_vector_search",
+                    "storage": "neondb_postgresql"
+                }), 200
+                
+            except Exception as llamaindex_error:
+                print(f"❌ V2 LlamaIndex search error: {str(llamaindex_error)}")
+                # Could fallback to traditional search here if implemented
+                return jsonify({"error": f"LlamaIndex search failed: {str(llamaindex_error)}"}), 500
+        else:
+            # Traditional search would go here
+            return jsonify({"error": "Traditional search not implemented. Enable LlamaIndex."}), 501
+        
+    except Exception as e:
+        print(f"❌ V2 Search error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v2/answer", methods=["POST", "OPTIONS"])
+def generate_answer_v2():
+    """V2 Answer generation endpoint with LlamaIndex + Qwen2"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        data = request.get_json()
+        query = data.get("query")
+        org_id = data.get("orgId")
+        file_ids = data.get("fileIds")  # Optional
+        
+        if not query or not org_id:
+            return jsonify({"error": "Missing required fields: query, orgId"}), 400
+        
+        if USE_LLAMAINDEX:
+            print(f"🤖 V2 LlamaIndex Answer Generation: '{query}' in org: {org_id}")
+            try:
+                from llamaindex_integration import get_llamaindex_processor
+                
+                processor = get_llamaindex_processor()
+                result = processor.generate_answer(
+                    query=query,
+                    org_id=org_id,
+                    file_ids=file_ids
+                )
+                
+                return jsonify({
+                    "query": query,
+                    "answer": result["answer"],
+                    "sources": result["sources"],
+                    "confidence": result["confidence"],
+                    "total_sources_found": result["total_sources_found"],
+                    "model": "qwen2.5-7b-instruct",
+                    "method": "llamaindex_rag",
+                    "storage": "neondb_postgresql"
+                }), 200
+                
+            except Exception as llamaindex_error:
+                print(f"❌ V2 LlamaIndex answer error: {str(llamaindex_error)}")
+                return jsonify({"error": f"LlamaIndex answer generation failed: {str(llamaindex_error)}"}), 500
+        else:
+            return jsonify({"error": "Answer generation requires LlamaIndex. Enable USE_LLAMAINDEX."}), 501
+        
+    except Exception as e:
+        print(f"❌ V2 Answer error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+def notify_backend_status(file_id, user_id, status, embedding_complete, error=None, source="flask_ai"):
     """Notify Node.js backend of file processing status via webhook"""
     try:
         backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8080")
@@ -6886,7 +7204,7 @@ def notify_backend_status(file_id, user_id, status, embedding_complete, error=No
             "status": status,
             "embeddingComplete": embedding_complete,
             "timestamp": datetime.now().isoformat(),
-            "source": "flask_ai_v2"
+            "source": source
         }
         
         if error:
@@ -6906,6 +7224,7 @@ def notify_backend_status(file_id, user_id, status, embedding_complete, error=No
             
     except Exception as e:
         print(f"❌ V2 Webhook error: {str(e)}")
+
 
 @app.route("/api/v2/delete-org-collections", methods=["DELETE", "OPTIONS"])
 def delete_org_collections():
@@ -7205,15 +7524,12 @@ def get_file_status_v2():
 
 @app.route("/process-project-support-embedding", methods=["POST", "OPTIONS"])
 def process_project_support_embedding():
-    """Process embeddings for project support documents (called from care-proposals backend) with WebSocket updates"""
+    """Process embeddings for project support documents using V3 approach (LlamaParse + HF + NeonDB)"""
     if request.method == "OPTIONS":
         return "", 200
         
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase is not available"}), 503
-        
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+    if not USE_LLAMAINDEX:
+        return jsonify({"error": "Project support processing requires LlamaIndex (USE_LLAMAINDEX=true)"}), 503
         
     save_path = None
     try:
@@ -7250,85 +7566,31 @@ def process_project_support_embedding():
                 if user_id:
                     notify_backend_status(file_id, user_id, "extracting", False)
                 
-                # Extract text and create chunks
-                chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+                # Use V3 approach: LlamaParse + HF embeddings + NeonDB storage
+                print(f"🚀 V3 Project Support: Starting LlamaParse processing...")
+                from direct_neondb_storage import process_file_direct_storage_project_support
                 
-                if not chunks:
-                    print(f"❌ No content extracted from {filename}")
+                result = process_file_direct_storage_project_support(
+                    file_path=save_path,
+                    file_id=file_id,
+                    org_id=org_id,
+                    user_id=user_id,
+                    project_id=project_id,
+                    filename=filename
+                )
+                
+                print(f"✅ V3 Project Support result: {result}")
+                
+                if not result.get("success"):
+                    error_msg = result.get("error", "Processing failed")
+                    print(f"❌ V3 Project Support failed: {error_msg}")
                     if user_id:
-                        notify_backend_status(file_id, user_id, "failed", False, "No content extracted from file")
+                        notify_backend_status(file_id, user_id, "failed", False, error_msg)
                     return
-                    
-                # Send embedding status
-                if user_id:
-                    notify_backend_status(file_id, user_id, "embedding", False)
                 
-                # Generate embeddings
-                embeddings = embed_chunks(chunks, upload_id=upload_id, org_id=org_id, filename=filename)
-                
-                # Store in project-specific Firestore collection structure
-                # STEP 1: Create/update the ORG parent document
-                org_doc_ref = db.collection("org_project_support_embeddings").document(f"org-{org_id}")
-                org_doc_ref.set({
-                    "org_id": org_id,
-                    "created_at": firestore.SERVER_TIMESTAMP,
-                    "last_updated": firestore.SERVER_TIMESTAMP,
-                    "project_count": firestore.Increment(1)
-                }, merge=True)
-                
-                # STEP 2: Create/update the PROJECT parent document  
-                project_parent_ref = org_doc_ref.collection("projects").document(f"project-{project_id}")
-                project_parent_ref.set({
-                    "project_id": project_id,
-                    "org_id": org_id,
-                    "created_at": firestore.SERVER_TIMESTAMP,
-                    "last_updated": firestore.SERVER_TIMESTAMP,
-                    "file_count": firestore.Increment(1)
-                }, merge=True)
-                
-                # STEP 3: Create the file document
-                project_doc_ref = project_parent_ref.collection("files").document(file_id)
-                project_doc_ref.set({
-                    "filename": filename,
-                    "file_id": file_id,
-                    "upload_id": upload_id,
-                    "project_id": project_id,
-                    "org_id": org_id,
-                    "file_type": file_ext,
-                    "document_type": "project_support",
-                    "created_at": firestore.SERVER_TIMESTAMP,
-                    "chunk_count": len(chunks),
-                    "processing_version": "4.2.0"
-                })
-                
-                # STEP 4: Store chunks in batches - OPTIMIZED for 50x faster writes
-                batch_size = 500  # Firestore allows up to 500 writes per batch
-                total_chunks = len(chunks)
-                
-                print(f"🚀 Storing {total_chunks} project chunks in batches of {batch_size}")
-                
-                for i in range(0, total_chunks, batch_size):
-                    batch = db.batch()
-                    end_idx = min(i + batch_size, total_chunks)
-                    
-                    for j in range(i, end_idx):
-                        chunk_ref = project_doc_ref.collection("chunks").document(str(j))
-                        batch.set(chunk_ref, {
-                            "content": chunks[j],
-                            "embedding": embeddings[j],
-                            "index": j
-                        })
-                    
-                    batch.commit()
-                    print(f"✓ Stored project batch {i//batch_size + 1}: {end_idx}/{total_chunks} chunks")
-                    
-                    # Only clean up memory for large batches
-                    if end_idx - i >= 100:
-                        del batch
-                        import gc
-                        gc.collect()
-                
+                # V3 storage handled by the function above
                 print(f"✅ Successfully processed project support document {filename} for Project: {project_id}")
+                print(f"📊 Stored {result.get('chunks_stored', 0)} chunks in project_support_embeddings table")
                 
                 # Send completion status
                 if user_id:
@@ -9244,6 +9506,206 @@ def store_embeddings_in_firestore(embeddings, chunks, file_id, org_id, filename)
     except Exception as e:
         print(f"❌ Firestore storage error: {e}")
         raise e
+
+@app.route("/api/v3/chat", methods=["POST", "OPTIONS"])
+def chat_v3():
+    """V3 Chat endpoint - Simple query with smart defaults"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        query = data.get("query")
+        org_id = data.get("orgId")  # Get orgId from request
+        conversation_history = data.get("conversationHistory", "")  # Get conversation history
+        
+        print(f"💬 V3 Chat query: '{query[:100]}...'")
+        print(f"🏢 V3 Chat orgId: {org_id}")
+        print(f"📜 V3 Chat conversation history: {conversation_history[:100]}..." if conversation_history else "📜 No conversation history")
+        
+        if not query:
+            return jsonify({"error": "Query is required"}), 400
+        
+        # Use provided orgId or default to None (search all orgs)
+        user_id = "api-user"  # Default user
+        file_ids = None  # Search all files
+        max_results = 5  # Good default
+        include_context = True  # Always include context for chat
+        
+        # Import retrieval and LLM systems
+        from retrieval_system import search_documents, get_context
+        from llm_integration import generate_rag_answer
+        
+        # Optimized: Single search call for both context and results
+        print("🎯 Getting context for query...")
+        search_results = search_documents(
+            query=query,
+            org_id=org_id,
+            file_ids=file_ids,
+            top_k=max_results
+        )
+        
+        # Build context from search results (faster than separate context call)
+        context_result = {
+            "context": "\n\n".join([result["text"][:500] for result in search_results[:3]]),  # Use top 3 results, 500 chars each
+            "sources": list(set([result["file_id"] for result in search_results])),
+            "total_chunks": len(search_results),
+            "avg_similarity": sum([result["similarity_score"] for result in search_results]) / len(search_results) if search_results else 0,
+            "chunks_metadata": search_results
+        }
+        
+        # Generate LLM answer using retrieved context
+        print("🤖 Generating LLM answer...")
+        
+        # Prepare enhanced context with conversation history
+        enhanced_context = context_result["context"]
+        if conversation_history:
+            enhanced_context = f"Previous conversation:\n{conversation_history}\n\nRelevant context:\n{context_result['context']}"
+        
+        llm_result = generate_rag_answer(
+            query=query,
+            context=enhanced_context,
+            max_length=1024,
+            temperature=0.7
+        )
+        
+        if llm_result["success"]:
+            # Clean the LLM response to extract only the answer
+            raw_answer = llm_result["answer"]
+            cleaned_answer = raw_answer
+            
+            # Try to extract just the assistant's answer from the full response
+            if "assistant" in raw_answer and raw_answer.count("assistant") > 0:
+                # Find the last occurrence of 'assistant' and extract what comes after
+                parts = raw_answer.split("assistant")
+                if len(parts) > 1:
+                    cleaned_answer = parts[-1].strip()
+            
+            # Remove any remaining system/user prefixes and common artifacts
+            for prefix in ["system\n", "user\n", "Answer:\n", "Answer:", "\nassistant\n"]:
+                if cleaned_answer.startswith(prefix):
+                    cleaned_answer = cleaned_answer[len(prefix):].strip()
+            
+            # Remove trailing artifacts
+            for suffix in ["<|im_end|>", "<|endoftext|>"]:
+                if cleaned_answer.endswith(suffix):
+                    cleaned_answer = cleaned_answer[:-len(suffix)].strip()
+            
+            print(f"🧹 Cleaned answer: {cleaned_answer[:100]}...")
+            
+            response = {
+                "query": query,
+                "orgId": org_id,
+                "conversationHistory": conversation_history,
+                "answer": cleaned_answer,
+                "sources": context_result["sources"],
+                "search_results": search_results,
+                "context_metadata": {
+                    "sources": context_result["sources"],
+                    "total_chunks": context_result["total_chunks"],
+                    "avg_similarity": context_result["avg_similarity"],
+                    "chunks_metadata": context_result["chunks_metadata"]
+                },
+                "llm_metadata": {
+                    "model": llm_result["model"],
+                    "context_used": llm_result["context_used"],
+                    "context_length": llm_result["context_length"]
+                },
+                "retrieval_method": "vector_similarity",
+                "embedding_model": "custom_hf_endpoint",
+                "pipeline": "complete_rag"
+            }
+        else:
+            # Fallback if LLM fails - return retrieval results
+            print("⚠️ LLM failed, returning retrieval results only")
+            response = {
+                "query": query,
+                "orgId": org_id,
+                "conversationHistory": conversation_history,
+                "answer": f"I found {len(search_results)} relevant results, but couldn't generate a complete answer. Please check the search results below.",
+                "sources": context_result["sources"],
+                "search_results": search_results,
+                "context_metadata": {
+                    "sources": context_result["sources"],
+                    "total_chunks": context_result["total_chunks"],
+                    "avg_similarity": context_result["avg_similarity"],
+                    "chunks_metadata": context_result["chunks_metadata"]
+                },
+                "llm_error": llm_result.get("error", "Unknown LLM error"),
+                "retrieval_method": "vector_similarity",
+                "embedding_model": "custom_hf_endpoint",
+                "pipeline": "retrieval_only"
+            }
+        
+        print(f"✅ V3 Chat response: {len(search_results) if search_results else 0} results")
+        return jsonify(response), 200
+        
+    except Exception as e:
+        print(f"❌ V3 Chat error: {str(e)}")
+        return jsonify({"error": f"Chat failed: {str(e)}"}), 500
+
+@app.route("/api/v3/search", methods=["POST", "OPTIONS"])
+def search_v3():
+    """V3 Search endpoint - Simple query with optimal defaults"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        query = data.get("query")
+        
+        print(f"🔍 V3 Search: '{query[:100]}...'")
+        
+        if not query:
+            return jsonify({"error": "Query is required"}), 400
+        
+        # Optimized defaults for fast and accurate results
+        org_id = None  # Search all organizations
+        file_ids = None  # Search all files
+        top_k = 5  # Fewer results for faster response
+        similarity_threshold = 0.7  # Higher threshold for better quality
+        
+        # Import and run search
+        from retrieval_system import NeonDBRetrieval
+        import asyncio
+        
+        retrieval = NeonDBRetrieval()
+        results = asyncio.run(retrieval.search_similar_chunks(
+            query=query,
+            org_id=org_id,
+            file_ids=file_ids,
+            top_k=top_k,
+            similarity_threshold=similarity_threshold
+        ))
+        
+        response = {
+            "query": query,
+            "results": results,
+            "total_results": len(results),
+            "search_params": {
+                "top_k": top_k,
+                "similarity_threshold": similarity_threshold,
+                "org_id": org_id,
+                "file_ids": file_ids
+            },
+            "retrieval_method": "vector_similarity",
+            "embedding_model": "custom_hf_endpoint"
+        }
+        
+        print(f"✅ V3 Search response: {len(results)} results")
+        return jsonify(response), 200
+        
+    except Exception as e:
+        print(f"❌ V3 Search error: {str(e)}")
+        return jsonify({"error": f"Search failed: {str(e)}"}), 500
 
 
 if __name__ == "__main__":

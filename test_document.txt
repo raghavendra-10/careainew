@@ -1,0 +1,26 @@
+This is a comprehensive test document for LlamaIndex processing.
+
+This document contains multiple paragraphs and sections to test the chunking and embedding functionality.
+
+Section 1: Introduction
+This document will be processed by LlamaIndex, which will:
+1. Parse the text content
+2. Split it into meaningful chunks
+3. Generate embeddings using the custom HuggingFace endpoint
+4. Store the embeddings in NeonDB PostgreSQL database
+
+Section 2: Technical Details  
+The system uses:
+- LlamaIndex for document processing and retrieval
+- Custom HuggingFace Space for embedding generation (Qwen3-Embedding-4B model)
+- NeonDB PostgreSQL with pgvector for vector storage
+- Flask API for handling file uploads
+
+Section 3: Expected Behavior
+When this document is uploaded via the v2/upload endpoint:
+- It should be split into approximately 4-6 chunks
+- Each chunk should get a 2560-dimensional embedding vector
+- All embeddings should be stored in the llamaindex_embeddings table
+- The system should return success with chunk count information
+
+This test document is designed to verify the complete end-to-end flow.
