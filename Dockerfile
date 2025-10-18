@@ -26,7 +26,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all Python files
 COPY *.py .
-COPY .env .
 
 # Create necessary directories
 RUN mkdir -p uploads logs temp && \
