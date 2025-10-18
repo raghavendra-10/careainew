@@ -102,7 +102,7 @@ llama-index-vector-stores-postgres
 llama-index-embeddings-huggingface
 llama-index-llms-huggingface
 llama-index-readers-file
-llama-cloud-services==0.6.76
+llama-parse>=0.4.0
 unstructured[pdf]>=0.15.15
 python-magic>=0.4.27
 asyncpg>=0.29.0

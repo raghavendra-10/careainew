@@ -200,8 +200,7 @@ def process_file_direct_storage_project_support(file_path: str, file_id: str, or
                 
                 # Parse the document
                 print(f"📊 Parsing {filename} with LlamaParse...")
-                result = parser.load_data(file_path)
-                documents = result
+                documents = parser.load_data(file_path)
                 print(f"📄 LlamaParse loaded {len(documents)} document(s)")
                 
             except Exception as e:
@@ -334,7 +333,7 @@ def process_file_direct_storage(file_path: str, file_id: str, org_id: str, user_
     if file_ext in llamaparse_supported:
         print(f"🚀 Using LlamaParse for {file_ext.upper()} file")
         try:
-            from llama_cloud_services import LlamaParse
+            from llama_parse import LlamaParse
             
             # Initialize LlamaParse
             parser = LlamaParse(
@@ -346,10 +345,7 @@ def process_file_direct_storage(file_path: str, file_id: str, org_id: str, user_
             
             # Parse the document
             print(f"📊 Parsing {filename} with LlamaParse...")
-            result = parser.parse(file_path)
-            
-            # Convert to LlamaIndex documents
-            documents = result.get_markdown_documents(split_by_page=False)
+            documents = parser.load_data(file_path)
             print(f"📄 LlamaParse loaded {len(documents)} document(s)")
             
             if documents:
