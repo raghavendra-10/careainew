@@ -191,16 +191,23 @@ def process_file_direct_storage_project_support(file_path: str, file_id: str, or
                 from llama_parse import LlamaParse
                 
                 # Initialize LlamaParse
+                api_key = os.getenv("LLAMA_CLOUD_API_KEY")
+                print(f"🔑 API Key present: {bool(api_key)}")
+                print(f"🔑 API Key length: {len(api_key) if api_key else 0}")
+                
                 parser = LlamaParse(
-                    api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
+                    api_key=api_key,
                     result_type="markdown",
                     verbose=True,
                     language="en"
                 )
+                print(f"✅ LlamaParse parser initialized successfully")
                 
                 # Parse the document
                 print(f"📊 Parsing {filename} with LlamaParse...")
+                print(f"🔄 About to call parser.load_data({file_path})")
                 documents = parser.load_data(file_path)
+                print(f"✅ parser.load_data completed successfully")
                 print(f"📄 LlamaParse loaded {len(documents)} document(s)")
                 
             except Exception as e:
@@ -345,7 +352,9 @@ def process_file_direct_storage(file_path: str, file_id: str, org_id: str, user_
             
             # Parse the document
             print(f"📊 Parsing {filename} with LlamaParse...")
+            print(f"🔄 About to call parser.load_data({file_path})")
             documents = parser.load_data(file_path)
+            print(f"✅ parser.load_data completed successfully")
             print(f"📄 LlamaParse loaded {len(documents)} document(s)")
             
             if documents:
