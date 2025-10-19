@@ -2346,9 +2346,15 @@ def extract_questions_with_ai_direct(file_path, filename):
         # Customize prompt based on file type
         if file_ext in ["png", "jpg", "jpeg", "gif", "webp"]:
             prompt = """
-Analyze the uploaded image/visual content and extract meaningful questions that can be answered based on what you can see in the image.
+Analyze the uploaded image/visual content and intelligently organize questions into logical sections with meaningful questions that can be answered based on what you can see in the image.
 
-Please extract the questions that someone might ask about this image. Focus on:
+TASK: Create an intelligent sectioning system that:
+1. Analyzes the content and identifies logical topic areas
+2. Creates meaningful sections based on the content
+3. Generates relevant questions for each section
+4. Maps questions to appropriate sections
+
+Focus on extracting questions about:
 - Visual elements and content
 - Text visible in the image (if any)
 - Diagrams, charts, or data visualizations
@@ -2356,42 +2362,110 @@ Please extract the questions that someone might ask about this image. Focus on:
 - Any processes or workflows shown
 - Information that can be read or interpreted
 
-For each question, provide:
-1. A clear, specific question
-2. A brief description explaining what the question aims to understand from the visual content
+Format your response as a valid JSON object with sections and questions, like this:
+{{
+  "sections": [
+    {{
+      "section_id": "visual_analysis",
+      "section_title": "Visual Analysis",
+      "section_description": "Questions about visual elements and overall composition",
+      "questions": [
+        {{
+          "question": "What does this chart show?",
+          "description": "Understanding the main data or information presented in the visualization"
+        }},
+        {{
+          "question": "What are the key visual elements?",
+          "description": "Identifying main components and their relationships"
+        }}
+      ]
+    }},
+    {{
+      "section_id": "content_details",
+      "section_title": "Content Details",
+      "section_description": "Questions about specific content and information",
+      "questions": [
+        {{
+          "question": "What processes are illustrated?",
+          "description": "Understanding workflows or procedures shown in the image"
+        }}
+      ]
+    }}
+  ]
+}}
 
-Format your response as a valid JSON array with objects containing "question" and "description" fields, like this:
-[
-  {{
-    "question": "What does this chart show?",
-    "description": "Understanding the main data or information presented in the visualization"
-  }},
-  {{
-    "question": "What are the key steps in this process?",
-    "description": "Identifying the workflow or procedure illustrated in the image"
-  }}
-]
-
-IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
+IMPORTANT: Return ONLY the JSON object, no additional text or formatting.
 """.format(filename=filename)
         else:
             prompt = """
-Analyze the uploaded document and extract meaningful questions that can be answered based on the information provided.
+Analyze the uploaded document and intelligently organize content into logical sections with meaningful questions based on the information provided.
 
-Please extract exact questions that are there in document. 
-Format your response as a valid JSON array with objects containing "question" and "description" fields, like this:
-[
-  {{
-    "question": "What is the main purpose of this system?",
-    "description": "Understanding the primary objective and goals of the system described in the document"
-  }},
-  {{
-    "question": "How does the process work?",
-    "description": "Detailed explanation of the workflow and steps involved in the process"
-  }}
-]
+TASK: Create an intelligent sectioning system that:
+1. Analyzes the document content and identifies logical topic areas
+2. Creates meaningful sections based on the document structure and content themes
+3. Generates relevant questions for each section
+4. Maps questions to appropriate sections based on content relevance
 
-IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
+Extract questions from the document and organize them by:
+- Main topics and themes
+- Document structure (if applicable)
+- Content areas and subjects
+- Functional areas or processes
+- Technical aspects vs business aspects
+- Strategic vs operational content
+
+Format your response as a valid JSON object with sections and questions, like this:
+{{
+  "sections": [
+    {{
+      "section_id": "overview_purpose",
+      "section_title": "Overview & Purpose",
+      "section_description": "Questions about the main objectives, goals, and overall scope",
+      "questions": [
+        {{
+          "question": "What is the main purpose of this system?",
+          "description": "Understanding the primary objective and goals described in the document"
+        }},
+        {{
+          "question": "What are the key benefits mentioned?",
+          "description": "Identifying the advantages and value propositions outlined"
+        }}
+      ]
+    }},
+    {{
+      "section_id": "processes_workflow",
+      "section_title": "Processes & Workflow",
+      "section_description": "Questions about how things work and operational procedures",
+      "questions": [
+        {{
+          "question": "How does the process work?",
+          "description": "Detailed explanation of the workflow and steps involved"
+        }},
+        {{
+          "question": "What are the key steps in implementation?",
+          "description": "Understanding the sequence of actions required"
+        }}
+      ]
+    }},
+    {{
+      "section_id": "technical_requirements",
+      "section_title": "Technical Requirements",
+      "section_description": "Questions about technical specifications and requirements",
+      "questions": [
+        {{
+          "question": "What are the technical specifications?",
+          "description": "Understanding the technical requirements and constraints"
+        }}
+      ]
+    }}
+  ]
+}}
+
+IMPORTANT: 
+- Create 3-6 logical sections based on the actual document content
+- Each section should have 2-5 relevant questions
+- Section IDs should be snake_case and descriptive
+- Return ONLY the JSON object, no additional text or formatting.
 """.format(filename=filename)
 
         model = GenerativeModel("gemini-2.0-flash")
@@ -2533,22 +2607,83 @@ IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
         
         # Try to extract JSON from the response
         try:
-            questions = json.loads(response_text)
+            parsed_response = json.loads(response_text)
             
-            # Validate the structure
-            if isinstance(questions, list):
+            # Check if response has the new sectioned format
+            if isinstance(parsed_response, dict) and "sections" in parsed_response:
+                # New sectioned format
+                sections_data = parsed_response["sections"]
+                if isinstance(sections_data, list):
+                    valid_sections = []
+                    total_questions = 0
+                    
+                    for section in sections_data:
+                        if isinstance(section, dict) and all(key in section for key in ["section_id", "section_title", "questions"]):
+                            valid_questions = []
+                            questions_list = section.get("questions", [])
+                            
+                            for q in questions_list:
+                                if isinstance(q, dict) and "question" in q and "description" in q:
+                                    valid_questions.append({
+                                        "question": str(q["question"]).strip(),
+                                        "description": str(q["description"]).strip()
+                                    })
+                                    total_questions += 1
+                            
+                            if valid_questions:  # Only add sections with valid questions
+                                valid_sections.append({
+                                    "section_id": str(section["section_id"]).strip(),
+                                    "section_title": str(section["section_title"]).strip(),
+                                    "section_description": str(section.get("section_description", "")).strip(),
+                                    "questions": valid_questions[:5]  # Limit to 5 questions per section
+                                })
+                    
+                    if valid_sections:
+                        sectioned_result = {
+                            "format": "sectioned",
+                            "sections": valid_sections[:6],  # Limit to 6 sections
+                            "total_sections": len(valid_sections),
+                            "total_questions": total_questions
+                        }
+                        print(f"✅ Successfully parsed {len(valid_sections)} sections with {total_questions} questions from {filename}")
+                        return sectioned_result
+                    else:
+                        print(f"⚠️ No valid sections found in response for {filename}")
+                        return []
+                else:
+                    print(f"⚠️ Invalid sections structure in response for {filename}")
+                    return []
+            
+            # Fallback: Check if it's the old format (direct list of questions)
+            elif isinstance(parsed_response, list):
                 valid_questions = []
-                for q in questions:
+                for q in parsed_response:
                     if isinstance(q, dict) and "question" in q and "description" in q:
                         valid_questions.append({
                             "question": str(q["question"]).strip(),
                             "description": str(q["description"]).strip()
                         })
                 
-                print(f"✅ Successfully parsed {len(valid_questions)} questions from {filename}")
-                return valid_questions[:15]  # Limit to 15 questions
+                if valid_questions:
+                    # Convert old format to new sectioned format with a single section
+                    sectioned_result = {
+                        "format": "sectioned",
+                        "sections": [{
+                            "section_id": "general_questions",
+                            "section_title": "General Questions",
+                            "section_description": "Questions extracted from the document",
+                            "questions": valid_questions[:15]
+                        }],
+                        "total_sections": 1,
+                        "total_questions": len(valid_questions)
+                    }
+                    print(f"✅ Successfully converted {len(valid_questions)} questions to sectioned format from {filename}")
+                    return sectioned_result
+                else:
+                    print(f"⚠️ No valid questions found in list format for {filename}")
+                    return []
             else:
-                print(f"⚠️ Invalid JSON structure from AI for {filename} (not a list)")
+                print(f"⚠️ Invalid JSON structure from AI for {filename} (unknown format)")
                 return []
                 
         except json.JSONDecodeError as e:
@@ -2569,11 +2704,23 @@ IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
                 })
             
             if questions:
+                # Convert to sectioned format
+                sectioned_result = {
+                    "format": "sectioned",
+                    "sections": [{
+                        "section_id": "extracted_questions",
+                        "section_title": "Extracted Questions",
+                        "section_description": "Questions extracted using fallback parsing",
+                        "questions": questions[:15]
+                    }],
+                    "total_sections": 1,
+                    "total_questions": len(questions)
+                }
                 print(f"✅ Extracted {len(questions)} questions using fallback regex for {filename}")
+                return sectioned_result
             else:
                 print(f"❌ Could not extract any questions from {filename}")
-                
-            return questions[:15]
+                return []
             
     except Exception as e:
         print(f"❌ Error extracting questions from {filename}: {str(e)}")
@@ -3760,28 +3907,13 @@ async def bulk_delete_from_neondb(org_id: str, file_ids: list) -> dict:
                     WHERE file_id = $1 AND org_id = $2
                 """, file_id, org_id)
                 
-                # Count chunks in project_support_embeddings table before deletion
-                project_support_count = await conn.fetchval("""
-                    SELECT COUNT(*) FROM project_support_embeddings 
-                    WHERE file_id = $1 AND org_id = $2
-                """, file_id, org_id)
-                
-                total_file_chunks = llamaindex_count + project_support_count
-                
-                if total_file_chunks > 0:
-                    # Get filename for reporting (try both tables)
+                if llamaindex_count > 0:
+                    # Get filename for reporting
                     filename = await conn.fetchval("""
                         SELECT metadata->>'filename' FROM llamaindex_embeddings 
                         WHERE file_id = $1 AND org_id = $2 AND metadata->>'filename' IS NOT NULL
                         LIMIT 1
                     """, file_id, org_id)
-                    
-                    if not filename:
-                        filename = await conn.fetchval("""
-                            SELECT metadata->>'filename' FROM project_support_embeddings 
-                            WHERE file_id = $1 AND org_id = $2 AND metadata->>'filename' IS NOT NULL
-                            LIMIT 1
-                        """, file_id, org_id)
                     
                     # Delete from llamaindex_embeddings table
                     await conn.execute("""
@@ -3789,25 +3921,17 @@ async def bulk_delete_from_neondb(org_id: str, file_ids: list) -> dict:
                         WHERE file_id = $1 AND org_id = $2
                     """, file_id, org_id)
                     
-                    # Delete from project_support_embeddings table
-                    await conn.execute("""
-                        DELETE FROM project_support_embeddings 
-                        WHERE file_id = $1 AND org_id = $2
-                    """, file_id, org_id)
-                    
-                    total_chunks_deleted += total_file_chunks
+                    total_chunks_deleted += llamaindex_count
                     successful_deletions += 1
                     
                     deletion_results.append({
                         "fileId": file_id,
                         "filename": filename or "unknown",
-                        "chunks_deleted": total_file_chunks,
-                        "llamaindex_chunks": llamaindex_count,
-                        "project_support_chunks": project_support_count,
+                        "chunks_deleted": llamaindex_count,
                         "success": True
                     })
                     
-                    print(f"✅ Deleted file {file_id}: {llamaindex_count} llamaindex + {project_support_count} project_support chunks")
+                    print(f"✅ Deleted file {file_id}: {llamaindex_count} chunks from llamaindex_embeddings")
                     
                 else:
                     deletion_results.append({
@@ -5061,21 +5185,63 @@ def process_question_generator_v2(file_path, filename, agent_run_id, user_id):
         
         notify_agent_status(agent_run_id, user_id, "generating", False)
         
-        if questions and len(questions) > 0:
-            result = {
-                "agent_type": "question_generator",
-                "questions": questions,
-                "total_questions": len(questions),
-                "file_processed": {
-                    "filename": filename,
-                    "questions_extracted": len(questions)
-                },
-                "processing_version": "v2.0.0",
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            print(f"✅ Generated {len(questions)} questions from {filename}")
-            return result
+        if questions:
+            # Handle both old and new sectioned formats
+            if isinstance(questions, dict) and questions.get("format") == "sectioned":
+                # New sectioned format
+                total_questions = questions.get("total_questions", 0)
+                sections_count = questions.get("total_sections", 0)
+                
+                result = {
+                    "agent_type": "question_generator",
+                    "format": "sectioned",
+                    "sections": questions.get("sections", []),
+                    "total_sections": sections_count,
+                    "total_questions": total_questions,
+                    "file_processed": {
+                        "filename": filename,
+                        "questions_extracted": total_questions,
+                        "sections_created": sections_count
+                    },
+                    "processing_version": "v2.1.0",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                print(f"✅ Generated {sections_count} sections with {total_questions} total questions from {filename}")
+                return result
+            elif isinstance(questions, list) and len(questions) > 0:
+                # Legacy format - convert to sectioned format
+                sectioned_result = {
+                    "format": "sectioned",
+                    "sections": [{
+                        "section_id": "legacy_questions",
+                        "section_title": "Document Questions",
+                        "section_description": "Questions extracted from the document",
+                        "questions": questions[:15]
+                    }],
+                    "total_sections": 1,
+                    "total_questions": len(questions)
+                }
+                
+                result = {
+                    "agent_type": "question_generator",
+                    "format": "sectioned",
+                    "sections": sectioned_result["sections"],
+                    "total_sections": 1,
+                    "total_questions": len(questions),
+                    "file_processed": {
+                        "filename": filename,
+                        "questions_extracted": len(questions),
+                        "sections_created": 1
+                    },
+                    "processing_version": "v2.1.0",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                print(f"✅ Generated 1 section with {len(questions)} questions from {filename} (legacy format converted)")
+                return result
+            else:
+                raise Exception("Invalid questions format returned from extraction")
         else:
             raise Exception("No questions could be extracted from the file")
             
