@@ -39,6 +39,13 @@ VERTEX_AVAILABLE = False
 db = None
 openai_client = None
 
+# Server startup time for uptime tracking
+start_time = time.time()
+
+# Keep-alive service variables
+keep_alive_thread = None
+keep_alive_running = False
+
 # Flask Setup
 app = Flask(__name__)
 CORS(app, origins="*", methods=["GET", "POST", "DELETE", "OPTIONS", "PUT"], 
@@ -2695,8 +2702,32 @@ def postAgentResultsAndQuestions(rfpId, agentResults, auth_token, agent_id=None)
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Simple health check endpoint"""
-    return jsonify({"status": "healthy"}), 200
+    """Enhanced health check endpoint with keep-alive status"""
+    global keep_alive_thread, keep_alive_running
+    
+    # Calculate uptime
+    uptime_seconds = time.time() - start_time
+    uptime_hours = uptime_seconds / 3600
+    
+    # Check keep-alive status
+    keep_alive_status = {
+        "enabled": os.environ.get("KEEP_ALIVE_ENABLED", "false").lower() == "true",
+        "running": keep_alive_running and keep_alive_thread and keep_alive_thread.is_alive(),
+        "thread_alive": keep_alive_thread.is_alive() if keep_alive_thread else False
+    }
+    
+    return jsonify({
+        "status": "healthy",
+        "timestamp": time.time(),
+        "uptime_seconds": round(uptime_seconds, 2),
+        "uptime_hours": round(uptime_hours, 2),
+        "keep_alive": keep_alive_status,
+        "server_info": {
+            "port": int(os.environ.get("PORT", "8002")),
+            "debug_mode": os.environ.get("DEBUG", "0") == "1",
+            "threads": int(os.environ.get("WAITRESS_THREADS", "8"))
+        }
+    }), 200
 
 @app.route("/status", methods=["GET"])
 def service_status():
@@ -2738,6 +2769,18 @@ def service_status():
     }
     
     return jsonify(status), 200
+
+# Keep-alive endpoints for Render server
+@app.route("/api/wake-up", methods=["GET"])
+def wake_up_server():
+    """Wake-up endpoint to prevent Render server from sleeping"""
+    return jsonify({
+        "status": "awake",
+        "message": "Server is active and responding",
+        "timestamp": time.time(),
+        "uptime_seconds": time.time() - start_time if 'start_time' in globals() else 0,
+        "keep_alive_enabled": os.environ.get("KEEP_ALIVE_ENABLED", "false").lower() == "true"
+    }), 200
 
 @app.route("/supported-files", methods=["GET"])
 def get_supported_file_types():
@@ -3655,12 +3698,9 @@ def delete_file_by_file_id():
 
 @app.route("/api/v2/bulk-delete", methods=["DELETE", "OPTIONS"])
 def bulk_delete_files_v2():
-    """Bulk delete files and their embeddings/chunks - V2 API"""
+    """Bulk delete files and their embeddings/chunks from NeonDB - V2 API"""
     if request.method == "OPTIONS":
         return "", 200
-        
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase is not available"}), 503
         
     try:
         data = request.get_json(silent=True) or {}
@@ -3678,8 +3718,35 @@ def bulk_delete_files_v2():
 
         print(f"🗑️ Bulk deleting embeddings for {len(file_ids)} files in org: {org_id}")
 
-        files_ref = db.collection("document_embeddings").document(f"org-{org_id}").collection("files")
+        # Use asyncio to run the deletion function
+        result = asyncio.run(bulk_delete_from_neondb(org_id, file_ids))
         
+        return jsonify(result["response"]), result["status_code"]
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Bulk deletion error: {error_msg}")
+        traceback.print_exc()
+        return jsonify({
+            "error": "Internal server error", 
+            "details": error_msg
+        }), 500
+
+
+async def bulk_delete_from_neondb(org_id: str, file_ids: list) -> dict:
+    """Delete files and their embeddings from NeonDB tables"""
+    import asyncpg
+    
+    db_url = os.getenv("NEON_DATABASE_URL")
+    if not db_url:
+        return {
+            "response": {"error": "NeonDB connection not configured"},
+            "status_code": 503
+        }
+    
+    conn = await asyncpg.connect(db_url)
+    
+    try:
         deletion_results = []
         total_chunks_deleted = 0
         successful_deletions = 0
@@ -3687,29 +3754,60 @@ def bulk_delete_files_v2():
         # Process each file
         for file_id in file_ids:
             try:
-                file_doc_ref = files_ref.document(file_id)
-                file_doc = file_doc_ref.get()
+                # Count chunks in llamaindex_embeddings table before deletion
+                llamaindex_count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM llamaindex_embeddings 
+                    WHERE file_id = $1 AND org_id = $2
+                """, file_id, org_id)
                 
-                if file_doc.exists:
-                    file_data = file_doc.to_dict()
+                # Count chunks in project_support_embeddings table before deletion
+                project_support_count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM project_support_embeddings 
+                    WHERE file_id = $1 AND org_id = $2
+                """, file_id, org_id)
+                
+                total_file_chunks = llamaindex_count + project_support_count
+                
+                if total_file_chunks > 0:
+                    # Get filename for reporting (try both tables)
+                    filename = await conn.fetchval("""
+                        SELECT metadata->>'filename' FROM llamaindex_embeddings 
+                        WHERE file_id = $1 AND org_id = $2 AND metadata->>'filename' IS NOT NULL
+                        LIMIT 1
+                    """, file_id, org_id)
                     
-                    # Delete all chunks in the file
-                    chunks_deleted = delete_collection(file_doc_ref.collection("chunks"), 100)
+                    if not filename:
+                        filename = await conn.fetchval("""
+                            SELECT metadata->>'filename' FROM project_support_embeddings 
+                            WHERE file_id = $1 AND org_id = $2 AND metadata->>'filename' IS NOT NULL
+                            LIMIT 1
+                        """, file_id, org_id)
                     
-                    # Delete the file document
-                    file_doc_ref.delete()
+                    # Delete from llamaindex_embeddings table
+                    await conn.execute("""
+                        DELETE FROM llamaindex_embeddings 
+                        WHERE file_id = $1 AND org_id = $2
+                    """, file_id, org_id)
                     
-                    total_chunks_deleted += chunks_deleted
+                    # Delete from project_support_embeddings table
+                    await conn.execute("""
+                        DELETE FROM project_support_embeddings 
+                        WHERE file_id = $1 AND org_id = $2
+                    """, file_id, org_id)
+                    
+                    total_chunks_deleted += total_file_chunks
                     successful_deletions += 1
                     
                     deletion_results.append({
                         "fileId": file_id,
-                        "filename": file_data.get("filename", "unknown"),
-                        "chunks_deleted": chunks_deleted,
+                        "filename": filename or "unknown",
+                        "chunks_deleted": total_file_chunks,
+                        "llamaindex_chunks": llamaindex_count,
+                        "project_support_chunks": project_support_count,
                         "success": True
                     })
                     
-                    print(f"✅ Deleted file {file_id} and {chunks_deleted} chunks")
+                    print(f"✅ Deleted file {file_id}: {llamaindex_count} llamaindex + {project_support_count} project_support chunks")
                     
                 else:
                     deletion_results.append({
@@ -3727,25 +3825,31 @@ def bulk_delete_files_v2():
                 })
                 print(f"❌ Error deleting {file_id}: {str(e)}")
 
-        return jsonify({
-            "success": True,
-            "message": f"Bulk deletion completed: {successful_deletions}/{len(file_ids)} files deleted",
-            "data": {
-                "total_files_processed": len(file_ids),
-                "successful_deletions": successful_deletions,
-                "total_chunks_deleted": total_chunks_deleted,
-                "deletion_results": deletion_results
-            }
-        }), 200
+        return {
+            "response": {
+                "success": True,
+                "message": f"Bulk deletion completed: {successful_deletions}/{len(file_ids)} files deleted",
+                "data": {
+                    "total_files_processed": len(file_ids),
+                    "successful_deletions": successful_deletions,
+                    "total_chunks_deleted": total_chunks_deleted,
+                    "deletion_results": deletion_results
+                }
+            },
+            "status_code": 200
+        }
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Bulk deletion error: {error_msg}")
-        traceback.print_exc()
-        return jsonify({
-            "error": "Internal server error", 
-            "details": error_msg
-        }), 500
+        print(f"❌ NeonDB bulk deletion error: {str(e)}")
+        return {
+            "response": {
+                "error": "Database error during bulk deletion",
+                "details": str(e)
+            },
+            "status_code": 500
+        }
+    finally:
+        await conn.close()
 
 # @app.route("/cleanup-orphaned", methods=["POST", "OPTIONS"])
 # def cleanup_orphaned_embeddings():
@@ -9361,19 +9465,6 @@ def get_task_status_enhanced(task_id):
             "details": str(e)
         }), 500
 
-@app.route("/health", methods=["GET"])
-def health_check_enhanced():
-    """Health check for enhanced system"""
-    return jsonify({
-        "status": "healthy",
-        "redis_available": REDIS_AVAILABLE,
-        "firebase_available": FIREBASE_AVAILABLE,
-        "openai_available": OPENAI_AVAILABLE,
-        "vertex_available": VERTEX_AVAILABLE,
-        "timestamp": time.time(),
-        "mode": "redis-enhanced" if REDIS_AVAILABLE else "memory-based"
-    })
-
 # Helper functions for queue integration
 def process_file_upload_internal(file_data, upload_params, task_id):
     """
@@ -9708,6 +9799,74 @@ def search_v3():
         return jsonify({"error": f"Search failed: {str(e)}"}), 500
 
 
+# Keep-alive service for Render server
+def keep_alive_service():
+    """Background service that pings the server to keep it alive"""
+    global keep_alive_running
+    
+    # Get configuration
+    interval = int(os.environ.get("KEEP_ALIVE_INTERVAL", "840"))  # 14 minutes default
+    port = int(os.environ.get("PORT", "8002"))
+    base_url = f"http://localhost:{port}"
+    
+    print(f"🔄 Keep-alive service started (interval: {interval}s)")
+    
+    while keep_alive_running:
+        try:
+            # Wait for the interval
+            time.sleep(interval)
+            
+            if not keep_alive_running:
+                break
+                
+            # Make a request to our own health endpoint
+            response = requests.get(f"{base_url}/health", timeout=30)
+            if response.status_code == 200:
+                print(f"✅ Keep-alive ping successful at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                print(f"⚠️ Keep-alive ping returned status {response.status_code}")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Keep-alive ping failed: {str(e)}")
+        except Exception as e:
+            print(f"❌ Keep-alive service error: {str(e)}")
+    
+    print("🛑 Keep-alive service stopped")
+
+
+def start_keep_alive_service():
+    """Start the keep-alive service in a background thread"""
+    global keep_alive_thread, keep_alive_running
+    
+    # Check if keep-alive is enabled
+    enabled = os.environ.get("KEEP_ALIVE_ENABLED", "false").lower() == "true"
+    debug_mode = os.environ.get("DEBUG", "0") == "1"
+    
+    if not enabled:
+        print("⏸️ Keep-alive service disabled (set KEEP_ALIVE_ENABLED=true to enable)")
+        return
+    
+    if debug_mode:
+        print("⏸️ Keep-alive service disabled in debug mode")
+        return
+        
+    if keep_alive_thread and keep_alive_thread.is_alive():
+        print("⚠️ Keep-alive service already running")
+        return
+    
+    keep_alive_running = True
+    keep_alive_thread = Thread(target=keep_alive_service, daemon=True)
+    keep_alive_thread.start()
+    print("🚀 Keep-alive service started in background")
+
+
+def stop_keep_alive_service():
+    """Stop the keep-alive service"""
+    global keep_alive_running
+    keep_alive_running = False
+    print("🛑 Keep-alive service stopping...")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8002))
     debug_mode = os.environ.get("DEBUG", "0") == "1"
@@ -9723,4 +9882,15 @@ if __name__ == "__main__":
     else:
         threads = int(os.environ.get("WAITRESS_THREADS", "8"))
         print(f"🚀 Starting server with Waitress on port {port} with {threads} threads")
-        serve(app, host="0.0.0.0", port=port, threads=threads)
+        
+        # Start keep-alive service for production
+        start_keep_alive_service()
+        
+        try:
+            serve(app, host="0.0.0.0", port=port, threads=threads)
+        except KeyboardInterrupt:
+            print("\n🛑 Shutting down server...")
+            stop_keep_alive_service()
+        except Exception as e:
+            print(f"❌ Server error: {e}")
+            stop_keep_alive_service()
