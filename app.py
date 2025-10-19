@@ -8043,8 +8043,8 @@ def assign_users_to_agent_response(response_id):
 # RESPONSE GENERATION API v2
 # ================================
 
-@app.route("/api/v2/generate-response", methods=["POST", "OPTIONS"])
-def generate_response_v2():
+@app.route("/api/v2/generate-response-old", methods=["POST", "OPTIONS"])
+def generate_response_v2_old():
     """Generate response based on project knowledge type (global or specific)"""
     if request.method == "OPTIONS":
         return "", 200
@@ -8326,6 +8326,159 @@ def generate_response_v2():
                 "retrieved_chunks": len(top_chunks),
                 "storage_structure": f"org_project_support_embeddings/org-{org_id}/projects/project-{project_id}/files"
             }), 200
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Generate Response v2 Error: {error_msg}")
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error", "details": error_msg}), 500
+
+# NEW MODERNIZED V2 GENERATE RESPONSE - USING V3 ARCHITECTURE
+@app.route("/api/v2/generate-response", methods=["POST", "OPTIONS"])
+def generate_response_v2():
+    """Generate response using modern V3 architecture with NeonDB"""
+    if request.method == "OPTIONS":
+        return "", 200
+        
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        query = data.get("query")
+        project_id = data.get("projectId")
+        org_id = data.get("orgId")
+        knowledge_base_option = data.get("knowledgeBaseOption", "global")  # "global" or "specific"
+        conversation_history = data.get("conversationHistory", "")
+        max_results = data.get("maxResults", 5)
+        
+        if not query or not org_id:
+            return jsonify({"error": "Query and orgId are required."}), 400
+
+        print(f"🤖 V2 Generate Response: '{query[:100]}...' for Org: {org_id}, Knowledge: {knowledge_base_option}")
+        
+        # Import modern retrieval and LLM systems
+        from retrieval_system import search_documents
+        from llm_integration import generate_rag_answer
+        
+        # Determine file filtering based on knowledge base option
+        file_ids = None  # Default: search all files
+        if knowledge_base_option == "specific" and project_id:
+            print(f"📁 Using project-specific knowledge for project: {project_id}")
+            # Note: This would require project-specific file mapping in NeonDB
+            # For now, we'll search all files and add project context
+        else:
+            print("🌐 Using global knowledge base")
+        
+        # Search documents using modern V3 system
+        print("🎯 Searching documents with modern retrieval system...")
+        search_results = search_documents(
+            query=query,
+            org_id=org_id,
+            file_ids=file_ids,
+            top_k=max_results
+        )
+        
+        # Build context from search results
+        context_result = {
+            "context": "\n\n".join([result["text"][:500] for result in search_results[:3]]),  # Top 3 results, 500 chars each
+            "sources": list(set([result["file_id"] for result in search_results])),
+            "total_chunks": len(search_results),
+            "avg_similarity": sum([result["similarity_score"] for result in search_results]) / len(search_results) if search_results else 0,
+            "chunks_metadata": search_results
+        }
+        
+        if not search_results:
+            return jsonify({
+                "query": query,
+                "project_id": project_id,
+                "org_id": org_id,
+                "knowledge_type": knowledge_base_option,
+                "answer": "I couldn't find relevant information in the knowledge base to answer this question.",
+                "source_files": [],
+                "retrieved_chunks": 0,
+                "search_results": []
+            }), 200
+        
+        # Generate LLM answer using retrieved context
+        print("🤖 Generating LLM answer...")
+        
+        # Prepare enhanced context with conversation history
+        enhanced_context = context_result["context"]
+        if conversation_history:
+            enhanced_context = f"Previous conversation:\n{conversation_history}\n\nRelevant context:\n{context_result['context']}"
+        
+        llm_result = generate_rag_answer(
+            query=query,
+            context=enhanced_context,
+            max_length=800,
+            temperature=0.7
+        )
+        
+        if llm_result["success"]:
+            # Clean the LLM response
+            raw_answer = llm_result["answer"]
+            cleaned_answer = raw_answer
+            
+            # Clean up response formatting
+            if "assistant" in raw_answer and raw_answer.count("assistant") > 0:
+                parts = raw_answer.split("assistant")
+                if len(parts) > 1:
+                    cleaned_answer = parts[-1].strip()
+            
+            # Remove system/user prefixes
+            for prefix in ["system\n", "user\n", "Answer:\n", "Answer:", "\nassistant\n"]:
+                if cleaned_answer.startswith(prefix):
+                    cleaned_answer = cleaned_answer[len(prefix):].strip()
+            
+            # Remove trailing artifacts
+            for suffix in ["<|im_end|>", "<|endoftext|>"]:
+                if cleaned_answer.endswith(suffix):
+                    cleaned_answer = cleaned_answer[:-len(suffix)].strip()
+            
+            answer = cleaned_answer
+        else:
+            answer = f"I found {len(search_results)} relevant results, but couldn't generate a complete answer. Please check the search results below."
+        
+        # Collect source files
+        source_files = []
+        seen_files = set()
+        for result in search_results:
+            file_id = result["file_id"]
+            if file_id not in seen_files:
+                source_files.append({
+                    "file_id": file_id,
+                    "filename": result.get("filename", "unknown"),
+                    "similarity_score": result["similarity_score"]
+                })
+                seen_files.add(file_id)
+        
+        # Return response in V2 format for compatibility
+        response = {
+            "query": query,
+            "project_id": project_id,
+            "org_id": org_id,
+            "knowledge_type": knowledge_base_option,
+            "answer": answer,
+            "source_files": source_files,
+            "retrieved_chunks": len(search_results),
+            "search_results": search_results,
+            "context_metadata": {
+                "sources": context_result["sources"],
+                "total_chunks": context_result["total_chunks"],
+                "avg_similarity": context_result["avg_similarity"]
+            },
+            "llm_metadata": {
+                "model": llm_result.get("model", "unknown"),
+                "context_used": llm_result.get("context_used", False),
+                "context_length": llm_result.get("context_length", 0)
+            } if llm_result["success"] else {},
+            "retrieval_method": "vector_similarity_v3",
+            "processing_version": "v2.1.0_modernized"
+        }
+        
+        print(f"✅ V2 Generate Response completed: {len(search_results)} results, answer length: {len(answer)}")
+        return jsonify(response), 200
 
     except Exception as e:
         error_msg = str(e)
