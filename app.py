@@ -8504,7 +8504,7 @@ def generate_questionnaire_response():
         
         questionnaire_id = data.get('questionnaireId')
         question_text = data.get('questionText')
-        response_type = data.get('responseType', 'short_answer')
+        response_type = data.get('responseType', 'text_answer')
         choices = data.get('choices', [])
         context = data.get('context', {})
         knowledge_base_option = data.get('knowledgeBaseOption', 'global')
@@ -8579,6 +8579,8 @@ Question: {question_text}
             prompt = base_prompt + "Respond with ONLY ONE WORD: either 'Complete' or 'Incomplete'. Nothing else."
         elif response_type == 'long_answer':
             prompt = base_prompt + "Provide a comprehensive detailed answer with examples, background information, and specific details. Use multiple paragraphs if needed."
+        elif response_type == 'text_answer':
+            prompt = base_prompt + "Provide a detailed answer with examples, background information, and specific details. Use multiple paragraphs if needed."
         else:  # short_answer or default
             prompt = base_prompt + "Provide a concise, professional answer in 1-2 sentences."
         
