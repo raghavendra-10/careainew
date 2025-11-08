@@ -75,6 +75,18 @@ class Qwen3LLMClient:
                     
                     # Clean up response - extract assistant's answer
                     clean_answer = result
+                    
+                    # Handle tuple response from Gradio (extract the first string element)
+                    if isinstance(result, (tuple, list)):
+                        # Find the first string in the tuple/list
+                        for item in result:
+                            if isinstance(item, str):
+                                result = item
+                                break
+                        else:
+                            # If no string found, convert first element to string
+                            result = str(result[0]) if result else ""
+                    
                     if isinstance(result, str):
                         # Remove chat template artifacts
                         if "assistant\n" in result:
@@ -91,7 +103,7 @@ class Qwen3LLMClient:
                             lines = clean_answer.split('\n')
                             # Find where actual response starts
                             for i, line in enumerate(lines):
-                                if line.strip() and not line.startswith("system") and not line.startswith("user") and not line.startswith("You are Qwen"):
+                                if isinstance(line, str) and line.strip() and not line.startswith("system") and not line.startswith("user") and not line.startswith("You are Qwen"):
                                     clean_answer = '\n'.join(lines[i:]).strip()
                                     break
                     
